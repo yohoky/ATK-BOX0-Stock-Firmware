@@ -1,0 +1,456 @@
+#include "app_config.h"
+#include "cfg_pins.h"
+
+Preferences prefs;
+
+char    g_wifiSsid[33] = "";
+char    g_wifiPass[65] = "";
+char    g_adminPass[17] = "123456";
+uint8_t g_volume = 60;   // v7.0 出厂默认 60(提示音已温和化, 30 偏小)
+uint8_t g_bright = 30;       // 出厂默认 30%(用户 2026-11-07 指定, 省电不刺眼)
+uint8_t g_autoOffMin = 0;    // 0 = 不自动熄屏
+uint8_t g_autoPowerOff = 1;  // 默认开启自动关机
+uint8_t g_powerOffMin = 30;  // 熄屏后 30 分钟无操作自动关机
+uint8_t g_refreshSec = 6;
+uint8_t g_jumpSec = 5;
+uint8_t g_displayMode = DISP_LIST;
+// 新闻条默认: 开, 8 秒一条, 10 分钟抓一次, 财经+科技混合
+uint8_t  g_newsOn     = 1;
+uint8_t  g_newsSec    = 8;
+uint16_t g_newsRefSec = 600;
+uint8_t  g_newsSrc    = 0;
+// 涨跌提醒: 默认开, 阈值 4%
+uint8_t  g_alertOn    = 1;
+float    g_alertPct   = 4.0f;
+// 重力感应: 默认开
+uint8_t  g_gyroOn     = 1;
+
+Station g_stations[MAX_STATIONS];
+uint8_t g_nStation = 0;
+int8_t  g_curStation = 0;
+
+StockDef g_stocks[MAX_STOCKS];
+uint8_t  g_nStock = 0;
+
+Quote g_quotes[MAX_STOCKS];
+SemaphoreHandle_t g_quoteMutex = nullptr;
+
+volatile RadioState g_radioState = RADIO_IDLE;
+char g_streamTitle[96] = "";
+volatile bool g_screenOn = true;
+volatile int  g_curStock = 0;
+
+// 音量待落盘标记(见 cfgFlushVolume)
+static volatile bool s_volDirty = false;
+static uint32_t s_volChangeAt = 0;
+
+// ★ Preferences 不是可重入的: 网页(async_tcp 任务)和主循环会同时写,
+//   不加锁偶发把 NVS 写坏 -> 重启后配置变乱码/丢电台。所有写操作走这把锁。
+static SemaphoreHandle_t s_cfgMux = nullptr;
+static inline void cfgLock()   { if (s_cfgMux) xSemaphoreTake(s_cfgMux, portMAX_DELAY); }
+static inline void cfgUnlock() { if (s_cfgMux) xSemaphoreGive(s_cfgMux); }
+
+// ---------- 默认预设 ----------
+static const char* DEF_STOCKS[] = {
+  "sh000001",    // 上证指数
+  "sz399001",    // 深证成指
+  "sh603993",    // 洛阳钼业
+  "sz000783",    // 长江证券
+  "sz000977",    // 浪潮信息
+  "sz000938",    // 紫光股份
+  "sz002670",    // 国盛证券
+  "sz159841",    // 证券ETF
+  "sh512980",    // 传媒ETF广发
+  "sh563020",    // 红利低波ETF易方达
+  "sz002657",    // 中科金财
+  "sz300215",    // 电科院
+  "sz002439",    // 启明星辰
+};
+// ── 内置电台(2026-11 实测可播, 全部走 http 明文, ESP32 上省内存/出音快) ──
+//    来源: radio-browser 中国区点播榜 + 逐个 range 请求验证(HTTP 200, audio/mpeg 或 aacp)
+static const char* DEF_STA_NAME[] = {
+  "中国之声", "北京新闻广播", "广东音乐之声", "上海动感101",
+  "上海经典947", "AsiaFM高清音乐", "听云相声台", "听云评书台"
+};
+static const char* DEF_STA_URL[] = {
+  "http://lhttp.qtfm.cn/live/15318317/64k.mp3",
+  "http://lhttp.qtfm.cn/live/339/64k.mp3",
+  "http://lhttp.qtfm.cn/live/1260/64k.mp3",
+  "http://lhttp.qingting.fm/live/274/64k.mp3",
+  "http://lhttp.qingting.fm/live/267/64k.mp3",
+  "http://asiafm.hk:8000/asiahd",
+  "http://m.tyradio.uk/tyxs.mp3",
+  "http://m.tyradio.uk/typs.mp3",
+};
+#define DEF_NSTA ((int)(sizeof(DEF_STA_NAME) / sizeof(DEF_STA_NAME[0])))
+
+// ---------------- 多组 WiFi 凭据 ----------------
+WifiProfile g_wifiProfiles[WIFI_PROFILE_N];
+uint8_t     g_wifiProfileN = 0;
+
+static void cfgWifiSave() {
+  prefs.putUChar("wpn", g_wifiProfileN);
+  for (uint8_t i = 0; i < WIFI_PROFILE_N; i++) {
+    char ks[8], kp[8];
+    snprintf(ks, sizeof(ks), "ws%u", (unsigned)i);
+    snprintf(kp, sizeof(kp), "wp%u", (unsigned)i);
+    if (i < g_wifiProfileN) {
+      prefs.putString(ks, g_wifiProfiles[i].ssid);
+      prefs.putString(kp, g_wifiProfiles[i].pass);
+    } else if (prefs.isKey(ks)) {
+      prefs.remove(ks);
+      prefs.remove(kp);
+    }
+  }
+}
+
+void cfgWifiLoad() {
+  memset(g_wifiProfiles, 0, sizeof(g_wifiProfiles));
+  g_wifiProfileN = prefs.getUChar("wpn", 0);
+  if (g_wifiProfileN > WIFI_PROFILE_N) g_wifiProfileN = WIFI_PROFILE_N;
+  for (uint8_t i = 0; i < g_wifiProfileN; i++) {
+    char ks[8], kp[8];
+    snprintf(ks, sizeof(ks), "ws%u", (unsigned)i);
+    snprintf(kp, sizeof(kp), "wp%u", (unsigned)i);
+    prefs.getString(ks, g_wifiProfiles[i].ssid, sizeof(g_wifiProfiles[i].ssid));
+    prefs.getString(kp, g_wifiProfiles[i].pass, sizeof(g_wifiProfiles[i].pass));
+    g_wifiProfiles[i].ssid[32] = 0;
+    g_wifiProfiles[i].pass[64] = 0;
+  }
+  // 旧固件只有单组 ssid/wpass: 自动迁移为第 1 组, 升级后不会掉网
+  if (g_wifiSsid[0] && !g_wifiProfileN) {
+    strncpy(g_wifiProfiles[0].ssid, g_wifiSsid, 32);
+    strncpy(g_wifiProfiles[0].pass, g_wifiPass, 64);
+    g_wifiProfileN = 1;
+    cfgWifiSave();
+  }
+  Serial.printf("[Cfg] 已保存 %u 组 WiFi\n", (unsigned)g_wifiProfileN);
+}
+
+int cfgWifiFind(const char* ssid) {
+  if (!ssid || !*ssid) return -1;
+  for (int i = 0; i < g_wifiProfileN; i++)
+    if (strncmp(g_wifiProfiles[i].ssid, ssid, 32) == 0) return i;
+  return -1;
+}
+
+bool cfgWifiAdd(const char* ssid, const char* pass) {
+  if (!ssid || !*ssid || strlen(ssid) > 32) return false;
+  cfgLock();
+  int found = cfgWifiFind(ssid);
+  WifiProfile p; memset(&p, 0, sizeof(p));
+  strncpy(p.ssid, ssid, 32); p.ssid[32] = 0;
+  strncpy(p.pass, pass ? pass : "", 64); p.pass[64] = 0;
+  if (found >= 0) {
+    for (int i = found; i > 0; i--) g_wifiProfiles[i] = g_wifiProfiles[i - 1];
+  } else {
+    if (g_wifiProfileN < WIFI_PROFILE_N) g_wifiProfileN++;
+    for (int i = g_wifiProfileN - 1; i > 0; i--)
+      g_wifiProfiles[i] = g_wifiProfiles[i - 1];
+  }
+  g_wifiProfiles[0] = p;
+  cfgWifiSave();
+  cfgUnlock();
+  return true;
+}
+
+bool cfgWifiDel(int idx) {
+  if (idx < 0 || idx >= g_wifiProfileN) return false;
+  cfgLock();
+  for (int i = idx; i < g_wifiProfileN - 1; i++)
+    g_wifiProfiles[i] = g_wifiProfiles[i + 1];
+  g_wifiProfileN--;
+  memset(&g_wifiProfiles[g_wifiProfileN], 0, sizeof(WifiProfile));
+  cfgWifiSave();
+  cfgUnlock();
+  return true;
+}
+
+bool cfgWifiUse(int idx) {
+  if (idx < 0 || idx >= g_wifiProfileN) return false;
+  cfgLock();
+  WifiProfile p = g_wifiProfiles[idx];
+  for (int i = idx; i > 0; i--) g_wifiProfiles[i] = g_wifiProfiles[i - 1];
+  g_wifiProfiles[0] = p;
+  cfgWifiSave();
+  strncpy(g_wifiSsid, p.ssid, 32); g_wifiSsid[32] = 0;
+  strncpy(g_wifiPass, p.pass, 64); g_wifiPass[64] = 0;
+  prefs.putString("ssid", g_wifiSsid);
+  prefs.putString("wpass", g_wifiPass);
+  cfgUnlock();
+  return true;
+}
+
+void cfgLoad() {
+  prefs.begin("box0", false);
+  if (!s_cfgMux) s_cfgMux = xSemaphoreCreateMutex();
+  g_quoteMutex = xSemaphoreCreateMutex();
+
+  prefs.getString("ssid", g_wifiSsid, sizeof(g_wifiSsid));
+  prefs.getString("wpass", g_wifiPass, sizeof(g_wifiPass));
+  prefs.getString("apass", g_adminPass, sizeof(g_adminPass));
+
+  // 开源版本不预置任何真实 WiFi 凭据(旧版曾写死过一组, 已移除以防泄露)。
+  // 首次使用: 设备会自动开热点 BOX0-Setup, 手机/电脑连上后打开 192.168.4.1 配网。
+  // 已配置过的设备 NVS 里保有 SSID/密码, 这里不做任何覆盖。
+
+  if (g_adminPass[0] == 0) strcpy(g_adminPass, "123456");
+  g_volume = prefs.getUChar("vol", 60);
+  g_bright = prefs.getUChar("brt", 30);
+  // 自动熄屏改"分钟档"(旧 aoff 键是秒, 已弃用; 用新 aoffm 避免旧值串味)
+  g_autoOffMin   = prefs.getUChar("aoffm", 0);
+  g_autoPowerOff = prefs.getUChar("apoff", 1);
+  g_powerOffMin  = prefs.getUChar("poffm", 30);
+  // 一次性把老设备的亮度改成新出厂默认 30%(只执行一次, 之后用户自调的值不再被覆盖)
+  if (prefs.getUChar("brtv", 0) < 2) {
+    prefs.putUChar("brtv", 2);
+    g_bright = 30;
+    prefs.putUChar("brt", 30);
+  }
+  // v7.0: 出厂默认值改 60。只影响"没有 vol 键"的新设备/清过 NVS 的设备，
+  //   不再做一次性覆盖 —— 用户自己调过的音量必须保留。
+  // 自动关机档位以 g_powerOffMin 为唯一数据源, 旧值非法时回落到默认 30 分
+  bool poffOk = false;
+  for (int i = 0; i < POFF_N; i++)
+    if (POFF_STEPS[i] == g_powerOffMin) { poffOk = true; break; }
+  if (!poffOk) { g_powerOffMin = 30; prefs.putUChar("poffm", 30); }
+  g_autoPowerOff = g_powerOffMin ? 1 : 0;
+  g_refreshSec = prefs.getUChar("ref", 6);
+  g_jumpSec = prefs.getUChar("jmp", 5);
+  // ---- 新闻条 ----
+  g_newsOn     = prefs.getUChar("nson", 1);
+  g_newsSec    = prefs.getUChar("nssec", 8);
+  g_newsRefSec = prefs.getUShort("nsref", 600);
+  g_newsSrc    = prefs.getUChar("nssrc", 0);
+  // ---- 涨跌提醒 + 重力 ----
+  g_alertOn    = prefs.getUChar("alton", 1);
+  g_alertPct   = prefs.getFloat("altpct", 4.0f);
+  g_gyroOn     = prefs.getUChar("gyro", 1);
+  // 默认"列表模式"; 老固件可能存过 DISP_ONE, 用一次性版本键升级过来
+  g_displayMode = prefs.getUChar("dsp", DISP_LIST);
+  if (g_displayMode > DISP_AUTO) g_displayMode = DISP_LIST;
+  if (prefs.getUChar("uiver", 0) < 6) {
+    prefs.putUChar("uiver", 6);
+    g_displayMode = DISP_AUTO;      // v6 起默认"重力自动"切换
+  }
+
+  // ---- 脏数据保护: NVS 写坏/旧版本残留时钳到合法区间, 否则会黑屏或秒切台 ----
+  g_wifiSsid[32] = 0;  g_wifiPass[64] = 0;  g_adminPass[16] = 0;
+  cfgWifiLoad();      // 读历史 WiFi 列表(旧版单组配置自动迁移成第 1 组)
+  if (g_bright < 5)   g_bright = 30;      // 0 会让屏幕全黑, 用户以为变砖
+  if (g_bright > 100) g_bright = 100;
+  // 自动熄屏只允许 0/1/3/5/10/30/60/120 分钟, 其它值归零
+  switch (g_autoOffMin) {
+    case 0: case 1: case 3: case 5: case 10: case 30: case 60: case 120: break;
+    default: g_autoOffMin = 0;
+  }
+  if (g_autoPowerOff > 1) g_autoPowerOff = 1;
+  if (g_powerOffMin < 1 || g_powerOffMin > 240) g_powerOffMin = 30;
+  if (g_refreshSec < 3)  g_refreshSec = 6;
+  if (g_refreshSec > 120) g_refreshSec = 120;
+  if (g_jumpSec < 2)   g_jumpSec = 5;
+  if (g_jumpSec > 60)  g_jumpSec = 60;
+  if (g_newsOn > 1)    g_newsOn = 1;
+  if (g_newsSec < 3)   g_newsSec = 8;
+  if (g_newsSec > 30)  g_newsSec = 30;
+  if (g_newsRefSec < 60)   g_newsRefSec = 600;   // 1 分钟以内太费流量
+  if (g_newsRefSec > 3600) g_newsRefSec = 3600;
+  if (g_newsSrc > NEWS_SRC - 1) g_newsSrc = 0;  if (g_alertOn > 1)   g_alertOn = 1;
+  if (g_alertPct < 1.0f || g_alertPct > 20.0f) g_alertPct = 4.0f;
+  if (g_gyroOn > 1)    g_gyroOn = 1;
+  if (g_volume > 100)  g_volume = 60;   // v7.0 出厂默认 60(提示音已温和化, 30 偏小)
+
+  g_nStation = prefs.getUChar("nsta", 0);
+  g_curStation = prefs.getChar("cursta", 0);
+  if (g_nStation > MAX_STATIONS) g_nStation = MAX_STATIONS;
+
+  // 结构版本不匹配(升级过固件) -> 列表按默认重建, 但保留 WiFi/密码/亮度
+  uint8_t ver = prefs.getUChar("cfgver", 1);
+  bool layoutChanged = (ver != CFG_VER);
+
+  if (layoutChanged || g_nStation == 0) {  // 首次上电/结构变更: 写默认电台
+    g_nStation = DEF_NSTA;
+    for (int i = 0; i < g_nStation; i++) {
+      memset(&g_stations[i], 0, sizeof(Station));
+      strncpy(g_stations[i].name, DEF_STA_NAME[i], STA_NAME_LEN - 1);
+      strncpy(g_stations[i].url, DEF_STA_URL[i], STA_URL_LEN - 1);
+    }
+    g_curStation = 0;
+    cfgSaveLists();
+  } else {
+    prefs.getBytes("sta", g_stations, sizeof(g_stations));
+  }
+
+  g_nStock = prefs.getUChar("nstk", 0);
+  if (g_nStock > MAX_STOCKS) g_nStock = MAX_STOCKS;
+  if (layoutChanged || g_nStock == 0) {
+    g_nStock = sizeof(DEF_STOCKS) / sizeof(DEF_STOCKS[0]);
+    for (int i = 0; i < g_nStock; i++) {
+      memset(&g_stocks[i], 0, sizeof(StockDef));
+      strncpy(g_stocks[i].code, DEF_STOCKS[i], STK_CODE_LEN - 1);
+    }
+    g_curStock = 0;
+    cfgSaveLists();
+  } else {
+    prefs.getBytes("stk", g_stocks, sizeof(g_stocks));
+  }
+  if (layoutChanged) prefs.putUChar("cfgver", CFG_VER);
+
+  if (g_curStation >= g_nStation) g_curStation = 0;
+  if (g_curStation < 0) g_curStation = 0;
+}
+
+void cfgSaveSettings() {
+  cfgLock();
+  s_volDirty = false;
+  prefs.putString("ssid", g_wifiSsid);
+  prefs.putString("wpass", g_wifiPass);
+  prefs.putString("apass", g_adminPass);
+  prefs.putUChar("vol", g_volume);
+  prefs.putUChar("brt", g_bright);
+  prefs.putUChar("aoffm", g_autoOffMin);
+  prefs.putUChar("apoff", g_autoPowerOff);
+  prefs.putUChar("poffm", g_powerOffMin);
+  prefs.putUChar("ref", g_refreshSec);
+  prefs.putUChar("jmp", g_jumpSec);
+  prefs.putUChar("dsp", g_displayMode);
+  prefs.putUChar("nson", g_newsOn);
+  prefs.putUChar("nssec", g_newsSec);
+  prefs.putUShort("nsref", g_newsRefSec);
+  prefs.putUChar("nssrc", g_newsSrc);
+  prefs.putUChar("alton", g_alertOn);
+  prefs.putFloat("altpct", g_alertPct);
+  prefs.putUChar("gyro", g_gyroOn);
+  prefs.putChar("cursta", g_curStation);
+  cfgUnlock();
+}
+
+// 音量连调时每 160ms 一次, 直接写 NVS 会反复擦写同一扇区;
+// 改为"标记脏 + 稳定 1.5 秒后落盘", 长按调完整段只写一次
+void cfgSaveVolume() {
+  s_volDirty = true;
+  s_volChangeAt = millis();
+}
+
+void cfgFlushVolume() {
+  if (!s_volDirty) return;
+  if (millis() - s_volChangeAt < 1500) return;
+  s_volDirty = false;
+  cfgLock();
+  prefs.putUChar("vol", g_volume);
+  cfgUnlock();
+}
+
+void cfgSaveCurStation() {
+  cfgLock();
+  prefs.putChar("cursta", g_curStation);
+  cfgUnlock();
+}
+
+void cfgFactoryReset() {
+  cfgLock();
+  prefs.clear();
+  cfgUnlock();
+  strcpy(g_wifiSsid, "");
+  strcpy(g_wifiPass, "");
+  memset(g_wifiProfiles, 0, sizeof(g_wifiProfiles));
+  g_wifiProfileN = 0;
+  strcpy(g_adminPass, "123456");
+  g_volume = 60;   // v7.0 出厂默认 60(提示音已温和化, 30 偏小)
+  g_bright = 30;
+  g_autoOffMin = 0;
+  g_autoPowerOff = 1;
+  g_powerOffMin = 30;
+  g_refreshSec = 6;
+  g_jumpSec = 5;
+  g_displayMode = DISP_LIST;
+  g_newsOn = 1;
+  g_newsSec = 8;
+  g_newsRefSec = 600;
+  g_newsSrc = 0;
+  g_alertOn = 1;
+  g_alertPct = 4.0f;
+  g_gyroOn = 1;
+
+  g_nStation = DEF_NSTA;
+  for (int i = 0; i < g_nStation; i++) {
+    strncpy(g_stations[i].name, DEF_STA_NAME[i], STA_NAME_LEN - 1);
+    strncpy(g_stations[i].url, DEF_STA_URL[i], STA_URL_LEN - 1);
+  }
+  g_curStation = 0;
+
+  g_nStock = sizeof(DEF_STOCKS) / sizeof(DEF_STOCKS[0]);
+  for (int i = 0; i < g_nStock; i++)
+    strncpy(g_stocks[i].code, DEF_STOCKS[i], STK_CODE_LEN - 1);
+  g_curStock = 0;
+
+  cfgSaveLists();
+  cfgSaveSettings();
+}
+
+void cfgSaveLists() {
+  cfgLock();
+  prefs.putUChar("cfgver", CFG_VER);
+  prefs.putUChar("nsta", g_nStation);
+  prefs.putBytes("sta", g_stations, sizeof(g_stations));
+  prefs.putUChar("nstk", g_nStock);
+  prefs.putBytes("stk", g_stocks, sizeof(g_stocks));
+  cfgUnlock();
+}
+
+bool quotesLock(uint32_t ms) {
+  return xSemaphoreTake(g_quoteMutex, pdMS_TO_TICKS(ms)) == pdTRUE;
+}
+void quotesUnlock() { xSemaphoreGive(g_quoteMutex); }
+
+// ---------- 编码工具 ----------
+#include "font_render.h"
+
+String GBKtoUTF8(const uint8_t* gbk, int len) {
+  String out;
+  out.reserve(len * 2);
+  for (int i = 0; i < len; ) {
+    uint8_t c = gbk[i];
+    if (c < 0x80) { out += (char)c; i++; continue; }
+    if (i + 1 >= len) break;
+    uint16_t uni = gbkToUni(((uint16_t)c << 8) | gbk[i + 1]);
+    i += 2;
+    if (uni == 0) { out += '?'; continue; }
+    if (uni < 0x80) out += (char)uni;
+    else if (uni < 0x800) {
+      out += (char)(0xC0 | (uni >> 6));
+      out += (char)(0x80 | (uni & 0x3F));
+    } else {
+      out += (char)(0xE0 | (uni >> 12));
+      out += (char)(0x80 | ((uni >> 6) & 0x3F));
+      out += (char)(0x80 | (uni & 0x3F));
+    }
+  }
+  return out;
+}
+
+bool utf8Valid(const uint8_t* s, int len) {
+  int i = 0;
+  while (i < len) {
+    uint8_t c = s[i];
+    int n = 0;
+    if (c < 0x80) n = 1;
+    else if ((c & 0xE0) == 0xC0) n = 2;
+    else if ((c & 0xF0) == 0xE0) n = 3;
+    else return false;
+    if (i + n > len) return false;
+    for (int k = 1; k < n; k++)
+      if ((s[i + k] & 0xC0) != 0x80) return false;
+    i += n;
+  }
+  return true;
+}
+
+// 交易时段判断 (周一~周五 9:15-11:30, 12:55-15:05, 北京时间)
+bool isTradingTime() {
+  struct tm t;
+  if (!getLocalTime(&t, 50)) return true;  // 拿不到时间按交易处理
+  if (t.tm_wday == 0 || t.tm_wday == 6) return false;
+  int m = t.tm_hour * 60 + t.tm_min;
+  return (m >= 555 && m <= 690) || (m >= 775 && m <= 905);
+}

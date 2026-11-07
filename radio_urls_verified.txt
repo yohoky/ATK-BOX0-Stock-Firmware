@@ -1,0 +1,26 @@
+BOX0 电台地址备查表
+验证时间: 2026-11-04 23:0x
+验证方法: curl range 请求, 判定 HTTP 200 + content-type 为 audio/mpeg 或 audio/aacp
+
+【已写入固件默认值的 8 个】
+1  中国之声        http://lhttp.qtfm.cn/live/15318317/64k.mp3
+2  北京新闻广播    http://lhttp.qtfm.cn/live/339/64k.mp3
+3  广东音乐之声    http://lhttp.qtfm.cn/live/1260/64k.mp3
+4  上海动感101     http://lhttp.qingting.fm/live/274/64k.mp3
+5  上海经典947     http://lhttp.qingting.fm/live/267/64k.mp3
+6  AsiaFM高清音乐  http://asiafm.hk:8000/asiahd            (AAC+ / 96k)
+7  听云相声台      http://m.tyradio.uk/tyxs.mp3
+8  听云评书台      http://m.tyradio.uk/typs.mp3
+
+【备用(同样实测通过, 可直接填进网页替换上面任何一个)】
+9  怀集音乐之声    http://lhttp.qingting.fm/live/4804/64k.mp3
+10 AsiaFM亚洲经典  http://goldfm.cn:8000/goldfm            (AAC+ / 128k)
+11 上海经典金曲    http://lhttp-hw.qtfm.cn/live/273/64k.mp3
+
+【说明】
+- 全部使用 http 明文: ESP32 上不走 TLS, 省 30~40KB 内存, 出声音更快。
+  同一地址的 https 版本也能播, 但没必要。
+- .m3u8 (HLS) 地址一律没用: 本机播放器对 HLS 支持不稳, 容易卡住。
+- zeno.fm 系列(德云社相声等)实测超时不可用, 已排除。
+- 想加自己的电台: 手机连 BOX0-Setup -> http://192.168.4.1 -> 电台页填名称+地址。
+  地址必须直链音频流(以 .mp3 结尾或直接返回 audio/*), 不要网页地址、不要 .m3u8。
