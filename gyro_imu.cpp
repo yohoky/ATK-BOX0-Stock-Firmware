@@ -125,6 +125,57 @@ int gyroI2CScan(uint8_t* out, int maxN) {
   return n;
 }
 
+// ---------------- v7.1 决定性硬件验证 ----------------
+// 官方宣传写「电子木鱼 3D 体感」, 但小智固件与板级 config.h 都没有 IMU 驱动。
+// 这个接口严格扫一遍 0x08..0x77, 用"两次 ACK + 两次读一致"过滤幽灵 ACK,
+// 一次性回答"板上到底有没有姿态传感器"。仅供登录后诊断调用, 不在开机路径执行。
+static bool strictRegRead(uint8_t addr, uint8_t reg, uint8_t* val) {
+  uint8_t a = 0, b = 0;
+  if (!regReadAt(addr, reg, &a)) return false;
+  if (!regReadAt(addr, reg, &b)) return false;
+  if (a != b) return false;
+  *val = a;
+  return true;
+}
+
+int gyroFullScan(String& out, int pwrPin) {
+  out = "";
+  // 仅在显式传 pwr 时临时拉高一个 GPIO 供电(排查"传感器需单独使能"的情况);
+  // 本项目已占用的引脚一律排除, 避免误动 LCD / codec / 电源锁存 / 按键。
+  static const int used[] = {0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14,
+                             21, 38, 39, 40, 41, 42, 47, 48};
+  bool powered = false;
+  if (pwrPin >= 0 && pwrPin <= 48) {
+    bool busy = false;
+    for (int u : used) if (u == pwrPin) { busy = true; break; }
+    if (!busy) {
+      pinMode(pwrPin, OUTPUT);
+      digitalWrite(pwrPin, HIGH);
+      powered = true;
+      delay(80);
+    }
+  }
+  int n = 0;
+  for (uint8_t a = 0x08; a <= 0x77; a++) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() != 0) continue;
+    delayMicroseconds(150);
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() != 0) continue;   // 二次确认, 过滤幽灵 ACK
+    uint8_t v00 = 0xFF, v0F = 0xFF, v75 = 0xFF;
+    strictRegRead(a, 0x00, &v00);
+    strictRegRead(a, 0x0F, &v0F);
+    strictRegRead(a, 0x75, &v75);
+    char b[40];
+    snprintf(b, sizeof(b), "%s0x%02X:00=%02X/0F=%02X/75=%02X",
+             n ? ";" : "", a, v00, v0F, v75);
+    out += b;
+    if (++n >= 48) break;
+  }
+  if (powered) { digitalWrite(pwrPin, LOW); pinMode(pwrPin, INPUT); }
+  return n;
+}
+
 GyroOrientation gyroRead() {
   if (!s_ok) return GYRO_UNKNOWN;
 

@@ -73,8 +73,9 @@ static void parseQuote(const char* code, const char* payload, Quote& q) {
   free(buf);
 }
 
-static void fetchOnce() {
-  if (WiFi.status() != WL_CONNECTED || g_nStock == 0) return;
+// 返回本次成功解析出的有效行情条数(0 = 网络未就绪 / HTTP 失败 / 解析失败)
+static int fetchOnce() {
+  if (WiFi.status() != WL_CONNECTED || g_nStock == 0) return 0;
   String url = "http://hq.sinajs.cn/list=";
   for (int i = 0; i < g_nStock; i++) {
     if (i) url += ',';
@@ -85,7 +86,7 @@ static void fetchOnce() {
   http.setTimeout(6000);
   http.setReuse(false);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  if (!http.begin(url)) return;
+  if (!http.begin(url)) return 0;
   // 新浪接口现在必须带 Referer, 否则返回 403; UA 也补上, 免得被当爬虫
   http.addHeader("Referer", "https://finance.sina.com.cn");
   http.addHeader("User-Agent",
@@ -125,10 +126,18 @@ static void fetchOnce() {
       pos = (q2 - (const char*)p) + 1;
     }
     uiRedrawTicker();
+    http.end();
+    int n = 0;
+    if (quotesLock(50)) {
+      for (int i = 0; i < g_nStock; i++) if (g_quotes[i].valid) n++;
+      quotesUnlock();
+    }
+    return n;
   } else {
     Serial.printf("[Stock] HTTP %d\n", code);
   }
   http.end();
+  return 0;
 }
 
 // ---------------- 同时段放量对比 ----------------
@@ -228,20 +237,40 @@ static void applyPrevAmount() {
 }
 
 static void stockTask(void* arg) {
+  // 开机后无论是否处在「信息更新」时段, 都要先成功抓到一次, 避免新设备空屏。
+  // v7.1.1 修复: 旧版开机时 WiFi/DNS 尚未就绪, fetchOnce() 静默失败却把 first 置 false,
+  //   于是盘外(例如凌晨开机)会一直空屏到第二天 9:00。现在按结果判定 + 退避重试。
+  bool first = true;
+  int  bootFail = 0;
   for (;;) {
     if (s_refreshNow) {
       s_refreshNow = false;
-      fetchOnce();
+      if (fetchOnce() > 0) first = false;
+      fetchPrevAmountOnce();
+      applyPrevAmount();
       continue;
     }
-    bool trading = isTradingTime();
-    fetchOnce();
-    // 每日开盘后第一次: 建昨日分时累计表(同时段放量对比用)
-    fetchPrevAmountOnce();
-    // 每次抓取后按当前时刻刷新"昨日同时刻累计额"
-    applyPrevAmount();
-    // 交易时段按配置刷新, 盘外 60s 一次, 失败退避
-    int delaySec = trading ? g_refreshSec : 60;
+    // v7.1: 是否抓行情由「信息更新」时间范围决定, 不再写死 9:15-15:05
+    bool inWin = isTradingTime();
+    if (inWin || first || g_fetchOutside) {
+      int got = fetchOnce();
+      if (got > 0) {
+        first = false;
+        bootFail = 0;
+        // 每日第一次: 建昨日分时累计表(同时段放量对比用)
+        fetchPrevAmountOnce();
+        // 每次抓取后按当前时刻刷新"昨日同时刻累计额"
+        applyPrevAmount();
+      } else if (first) {
+        bootFail++;
+        if (bootFail > 120) first = false;   // 长期离线(约 1 小时): 等进窗口再抓
+        int wait = (bootFail < 10) ? 50 : 300;   // 前 10 次每 5 秒, 之后每 30 秒
+        for (int i = 0; i < wait && !s_refreshNow; i++) vTaskDelay(pdMS_TO_TICKS(100));
+        continue;
+      }
+    }
+    // 时段内按 g_refreshSec 刷新; 时段外: 允许低频就 300s, 否则 10s 空转等进窗口
+    int delaySec = inWin ? g_refreshSec : (g_fetchOutside ? 300 : 10);
     for (int i = 0; i < delaySec * 10 && !s_refreshNow; i++)
       vTaskDelay(pdMS_TO_TICKS(100));
   }

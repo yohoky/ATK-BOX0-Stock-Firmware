@@ -1,6 +1,7 @@
 @echo off
 rem ============================================================
 rem  BOX0 只更新应用区(0x10000), 不丢 NVS 配置
+rem  仅适用于已经在跑本项目固件的设备；从官方八合一/小智固件刷过来请用 flash_full.bat
 rem  用法:  flash_app.bat COM8
 rem         flash_app.bat COM8 "D:\tools\esptool.exe"   (自定义 esptool 路径)
 rem
@@ -21,7 +22,7 @@ if not exist "%ESPTOOL%" (
   goto :end
 )
 
-set "BIN=%~dp0firmware\box0_stock_v7.0.bin"
+set "BIN=%~dp0firmware\box0_stock_v7.1.bin"
 if not exist "%BIN%" (
   echo [ERR] 固件不存在: %BIN%
   goto :end

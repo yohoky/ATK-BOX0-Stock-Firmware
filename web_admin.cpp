@@ -13,12 +13,20 @@
 #include <ArduinoJson.h>
 #include <esp_random.h>
 #include <Update.h>
+#include <time.h>
 
 static AsyncWebServer server(80);
 
 static String s_token = "";
 static uint32_t s_powerOffAt = 0;
 static volatile bool s_otaDone = false;   // OTA 收完 -> 回响应后再重启
+
+// v7.1 严格 I2C 姿态传感器探测: 同 WiFi 扫描, 放主循环跑, 结果轮询读取
+static volatile bool s_imuReq  = false;
+static volatile bool s_imuDone = false;
+static volatile int  s_imuPwr  = -1;
+static String s_imuOut = "";
+static int    s_imuN   = 0;
 
 // WiFi 扫描: 在 loop 里做(不阻塞 async_tcp 任务), 页面轮询结果
 static volatile bool s_scanReq  = false;
@@ -170,15 +178,19 @@ box-shadow:0 4px 16px rgba(0,0,0,.5);max-width:90%;text-align:center}
   <select id=disp onchange="post('/api/settings',{disp:+this.value})">
     <option value=0>单只大屏（大字现价 + 涨跌 + 开高低额）</option>
     <option value=1>列表模式（一屏 6 只，每几秒自动翻页）</option>
-    <option value=2>重力自动（竖放=单只，横放=列表）</option>
+    <option value=2>定时自动（列表/单只自动交替）</option>
   </select>
   <div class=hint>改动立即生效，盒子屏幕会刷新。<br>
   列表模式：左右短按手动翻页，到"轮播间隔"自动翻页；左右长按仍是音量。<br>
-  本板未焊六轴传感器，重力自动不可用；请选单只大屏或列表模式。</div>
-  <label>重力感应</label>
-  <select id=gyro onchange="post('/api/settings',{gyro:+this.value})">
-    <option value=1>开启（竖放单只/横放列表）</option>
-    <option value=0>关闭</option>
+  <b>本板未焊六轴传感器，重力翻转硬件上做不到</b>；"定时自动"是可用替代，按下面间隔在列表与单只大屏之间自动切换。若日后探测到 IMU 会自动改为重力优先。</div>
+  <label>自动切换间隔（仅"定时自动"模式）</label>
+  <select id=aswsec onchange="post('/api/settings',{aswsec:+this.value})">
+    <option value=0>不自动切换</option>
+    <option value=10>10 秒</option>
+    <option value=20>20 秒</option>
+    <option value=30>30 秒</option>
+    <option value=60>1 分钟</option>
+    <option value=120>2 分钟</option>
   </select>
   <label>屏幕亮度 <span id=brtv style="color:#1d9e75"></span></label>
   <input type=range id=brt min=10 max=100 step=5
@@ -188,6 +200,34 @@ box-shadow:0 4px 16px rgba(0,0,0,.5);max-width:90%;text-align:center}
   <input type=range id=vol min=0 max=100 step=5
     oninput="volv.innerText=this.value"
     onchange="post('/api/settings',{volume:+this.value})">
+
+  <h3>时间范围</h3>
+  <div class=card>两套时段<b>互相独立</b>：「信息更新」决定何时抓行情，「预警提示」决定何时允许响铃。<br>
+  默认 9:00–11:30 / 13:00–15:00。收盘后不再刷新、也不再提醒，不会在 15:00 之后突然"滴滴"。</div>
+  <label>信息更新时段（行情抓取）</label>
+  <div class=row>
+    <div><label>上午 起</label><input id=famS type=time></div>
+    <div><label>上午 止</label><input id=famE type=time></div>
+  </div>
+  <div class=row>
+    <div><label>下午 起</label><input id=fpmS type=time></div>
+    <div><label>下午 止</label><input id=fpmE type=time></div>
+  </div>
+  <label>预警提示时段（涨跌响铃）</label>
+  <div class=row>
+    <div><label>上午 起</label><input id=aamS type=time></div>
+    <div><label>上午 止</label><input id=aamE type=time></div>
+  </div>
+  <div class=row>
+    <div><label>下午 起</label><input id=apmS type=time></div>
+    <div><label>下午 止</label><input id=apmE type=time></div>
+  </div>
+  <div class=row>
+    <div><label>仅工作日生效</label><select id=twkd>
+      <option value=1>是（周一~周五）</option><option value=0>否（每天）</option></select></div>
+    <div><label>时段外仍抓行情</label><select id=ftout>
+      <option value=0>否（不抓，省电）</option><option value=1>是（每 5 分钟）</option></select></div>
+  </div>
 
   <h3>行情</h3>
   <div class=row>
@@ -204,7 +244,9 @@ box-shadow:0 4px 16px rgba(0,0,0,.5);max-width:90%;text-align:center}
     </div>
     <div><label>触发阈值（%）</label><input id=altpct type=number min=1 max=20 step=0.5></div>
   </div>
-  <div class=hint>交易时段内，任一自选股涨跌幅达到阈值就"滴滴"提醒（每天每只最多一次）。</div>
+  <div class=hint>只在上面的「预警提示」时段内检查。全局阈值对"留空"的股票生效；下面可给单只股票单独设阈值，<b>改某只不会影响其它股票的触发记录</b>。每只每天最多提醒一次：弹屏 12 秒 + 两声"滴滴"，<b>没有语音播报</b>。</div>
+  <label>每只股票独立阈值（留空=跟随全局，-1=这只不提醒）</label>
+  <div id=perbox class=card>读取中...</div>
   <label>无操作自动熄屏（分钟）</label>
   <select id=aoff onchange="post('/api/settings',{autooff:+this.value})">
     <option value=0>不自动熄屏</option>
@@ -225,12 +267,12 @@ box-shadow:0 4px 16px rgba(0,0,0,.5);max-width:90%;text-align:center}
     <option value=240>息屏后 4 小时</option>
   </select>
   <div class=hint>熄屏后按任意键点亮（第一次按键只唤醒，不会误操作）。<br>
-  到点且期间无任何按键会断电/深睡，按 M 键再开机。盒子上「自动关机」菜单也能改。</div>
+  <b>v7.1 已修</b>：旧版把常态为低电平的 M 键放进深睡唤醒掩码，刚进深睡就被唤醒，看起来像"没关机"；现改为只用左/右键唤醒，电池供电仍按 M 键开机。计时也不再被弹屏/toast 清零。</div>
 
   <h3>安全</h3>
   <label>新的管理密码（4-15 位，留空不改）</label>
   <input id=apass type=password autocomplete=new-password>
-  <button class=act onclick=saveSet()>保存设置</button>
+  <button class=act onclick=saveSet()>保存设置（含时间范围与每股阈值）</button>
 </div>
 
 <div class="tab" id=t2>
@@ -254,6 +296,7 @@ box-shadow:0 4px 16px rgba(0,0,0,.5);max-width:90%;text-align:center}
   <h3>设备</h3>
   <div class=card><div id=info></div></div>
   <button class="act gray" onclick=showDiag()>查看诊断 JSON</button>
+  <button class="act gray" onclick=doImu()>严格探测姿态传感器（I2C 全总线）</button>
   <button class="act gray" onclick=doRefresh()>立即刷新行情</button>
   <button class="act gray" onclick=doReconnect()>重新连接 WiFi</button>
   <button class="act gray" onclick=testBeep()>测试提醒音（盒子喇叭）</button>
@@ -349,15 +392,62 @@ async function load(){
   document.getElementById('jmp').value=CFG.jump;
   document.getElementById('aoff').value=CFG.autooff;
   document.getElementById('disp').value=CFG.disp;
-  document.getElementById('gyro').value=CFG.gyro;
+  document.getElementById('aswsec').value=CFG.aswsec;
   document.getElementById('alton').value=CFG.alton;
   document.getElementById('altpct').value=CFG.altpct;
   document.getElementById('poff').value=CFG.poweroffmin;
   document.getElementById('ssid').value=CFG.ssid;
+  document.getElementById('twkd').value=CFG.twkd;
+  document.getElementById('ftout').value=CFG.ftout;
+  putWin('f',CFG.fetchwin); putWin('a',CFG.alertwin);
   var fv=document.getElementById('fwver');if(fv)fv.innerText=CFG.version||'-';
   renderWifiList();
+  renderPer();
   paint(CFG);
   buildQuick();
+}
+// ---- v7.1 时间范围: HH:MM <-> 当日分钟数 ----
+function m2t(m){m=+m||0;return ('0'+Math.floor(m/60)).slice(-2)+':'+('0'+(m%60)).slice(-2)}
+function t2m(s){if(!s)return 0;var p=s.split(':');return (+p[0])*60+(+p[1])}
+function putWin(p,w){
+  w=w||[540,690,780,900];
+  document.getElementById(p+'amS').value=m2t(w[0]);
+  document.getElementById(p+'amE').value=m2t(w[1]);
+  document.getElementById(p+'pmS').value=m2t(w[2]);
+  document.getElementById(p+'pmE').value=m2t(w[3]);
+}
+function getWin(p){
+  return [t2m(document.getElementById(p+'amS').value),
+          t2m(document.getElementById(p+'amE').value),
+          t2m(document.getElementById(p+'pmS').value),
+          t2m(document.getElementById(p+'pmE').value)];
+}
+// ---- v7.1 每只股票独立提醒阈值 ----
+function renderPer(){
+  var box=document.getElementById('perbox');if(!box)return;
+  var st=CFG.stocks||[],per=CFG.altper||[];
+  var h='<div class=hint>共 '+st.length+' 只 · 全局阈值 '+CFG.altpct+'% · 留空跟随全局，填 -1 关闭该股提醒</div>';
+  for(var i=0;i<st.length;i++){
+    var v=(per[i]===undefined||per[i]===0)?'':per[i];
+    h+='<div class=row style="margin:2px 0"><div style="flex:1"><label>'+esc(st[i])+'</label></div>'+
+       '<div style="width:96px"><input data-per="'+i+'" type=number min=-1 max=20 step=0.5 value="'+v+'" placeholder="全局"></div></div>';
+  }
+  box.innerHTML=h;
+}
+async function doImu(){
+  var box=document.getElementById('diagbox');
+  box.style.display='block';
+  box.textContent='正在严格扫描 I2C 总线 0x08-0x77（两次 ACK 确认）…';
+  try{
+    await fetch('/api/imu',{cache:'no-store'});
+    for(var i=0;i<25;i++){
+      await new Promise(function(res){setTimeout(res,400)});
+      var r=await fetch('/api/imu?get=1',{cache:'no-store'}),j=await r.json();
+      if(j.done){box.textContent=JSON.stringify(j,null,2);return}
+      box.textContent='扫描中… '+(i+1)+'/25';
+    }
+    box.textContent='扫描超时，请稍后访问 /api/imu?get=1 查看结果';
+  }catch(e){box.textContent='扫描失败: '+e}
 }
 var QK=[['上证指数','sh000001'],['深证成指','sz399001'],['创业板指','sz399006'],
 ['贵州茅台','sh600519'],['宁德时代','sz300750'],['比亚迪','sz002594'],
@@ -386,13 +476,23 @@ function saveSet(){
          jump:+document.getElementById('jmp').value,
          autooff:+document.getElementById('aoff').value,
          poweroffmin:+document.getElementById('poff').value,
-         gyro:+document.getElementById('gyro').value,
+         aswsec:+document.getElementById('aswsec').value,
          alton:+document.getElementById('alton').value,
-         altpct:+document.getElementById('altpct').value};
+         altpct:+document.getElementById('altpct').value,
+         twkd:+document.getElementById('twkd').value,
+         ftout:+document.getElementById('ftout').value,
+         fetchwin:getWin('f'),
+         alertwin:getWin('a')};
+  var per=[],els=document.querySelectorAll('[data-per]');
+  for(var i=0;i<els.length;i++){
+    var s=(els[i].value||'').trim();
+    per.push(s===''?0:parseFloat(s));
+  }
+  o.altper=per;
   var p=document.getElementById('apass').value;
   if(p)o.adminpass=p;
   post('/api/settings',o).then(function(d){
-    if(d&&d.ok)document.getElementById('apass').value='';
+    if(d&&d.ok){document.getElementById('apass').value='';msg('设置已保存并生效')}
   });
 }
 var scanTimer=null;
@@ -505,6 +605,8 @@ var APIS=[
  ['GET','/api/wifi','网络状态'],
  ['GET','/api/scanres','上次扫描结果'],
  ['GET','/api/scan','触发 WiFi 扫描'],
+ ['GET','/api/imu','触发严格 I2C 探测'],
+ ['GET','/api/imu?get=1','读取 I2C 探测结果'],
  ['POST','/api/beep','测试提示音'],
  ['POST','/api/refresh','立即刷新行情'],
  ['POST','/api/reconnect','重新连接 WiFi']
@@ -633,6 +735,18 @@ static void handleCfg(AsyncWebServerRequest* r) {
   j["gyro"] = g_gyroOn;
   j["alton"] = g_alertOn;
   j["altpct"] = g_alertPct;
+  // v7.1: 两套时间范围 / 自动切换间隔 / 每股独立阈值
+  JsonArray fw = j["fetchwin"].to<JsonArray>();
+  fw.add(g_fetchWin.amS); fw.add(g_fetchWin.amE);
+  fw.add(g_fetchWin.pmS); fw.add(g_fetchWin.pmE);
+  JsonArray aw = j["alertwin"].to<JsonArray>();
+  aw.add(g_alertWin.amS); aw.add(g_alertWin.amE);
+  aw.add(g_alertWin.pmS); aw.add(g_alertWin.pmE);
+  j["twkd"]  = g_workdayOnly;
+  j["ftout"] = g_fetchOutside;
+  j["aswsec"] = g_autoSwitchSec;
+  JsonArray per = j["altper"].to<JsonArray>();
+  for (int i = 0; i < g_nStock; i++) per.add(g_alertPer[i]);
   j["ssid"] = g_wifiSsid;
   // 历史 WiFi: 只回传 SSID 和"是否开放", 密码绝不出现在 HTTP 响应里
   JsonArray wps = j["wifiprofiles"].to<JsonArray>();
@@ -668,7 +782,7 @@ static void handleCfg(AsyncWebServerRequest* r) {
 #else
   snprintf(info, sizeof(info),
            "固件 %s\n网络 %s\nIP %s\n热点 192.168.4.1\n空闲内存 %uKB\n已运行 %luh%02lum\n"
-           "亮度 %u%% · 音量 %u · 熄屏 %u分 · 关机 %s",
+           "亮度 %u%% · 音量 %u · 熄屏 %u分 · 关机 %s\n信息更新/预警提示时段见设置页",
            FW_VERSION, wifiStateText(), g_wifiIp,
            (unsigned)(ESP.getFreeHeap() / 1024), up / 3600, (up / 60) % 60,
            (unsigned)g_bright, (unsigned)g_volume,
@@ -761,6 +875,47 @@ static void handleDiag(AsyncWebServerRequest* r) {
   j["powerOffMin"]  = (int)g_powerOffMin;
   j["screenOn"]     = (bool)g_screenOn;
   j["alertActive"]  = uiAlertActive();
+
+  // ---- v7.1: 两套时间窗口 / 提醒阈值 / 自动关机计时 / 自动显示 ----
+  {
+    struct tm t;
+    bool hasTime = getLocalTime(&t, 50);
+    j["hasTime"]  = hasTime;
+    j["now"]      = hasTime ? (int)(t.tm_hour * 60 + t.tm_min) : -1;
+    j["weekday"]  = hasTime ? (int)t.tm_wday : -1;
+  }
+  j["inFetchWin"] = isTradingTime();
+  j["inAlertWin"] = isAlertTime();
+  j["workdayOnly"]  = (int)g_workdayOnly;
+  j["fetchOutside"] = (int)g_fetchOutside;
+  {
+    JsonArray fw = j["fetchWin"].to<JsonArray>();
+    fw.add(g_fetchWin.amS); fw.add(g_fetchWin.amE);
+    fw.add(g_fetchWin.pmS); fw.add(g_fetchWin.pmE);
+    JsonArray aw = j["alertWin"].to<JsonArray>();
+    aw.add(g_alertWin.amS); aw.add(g_alertWin.amE);
+    aw.add(g_alertWin.pmS); aw.add(g_alertWin.pmE);
+  }
+  j["alertOn"]   = (int)g_alertOn;
+  j["alertPct"]  = g_alertPct;
+  {
+    JsonArray th = j["alertEffective"].to<JsonArray>();
+    for (int i = 0; i < g_nStock; i++) th.add(alertThresholdFor(i));
+  }
+  j["autoSwitchSec"] = (int)g_autoSwitchSec;
+  j["autoEffMode"]   = (int)g_autoEffMode;
+  // 自动关机倒计时: base=实际采用的计时基准, left=距关机剩余秒(-1=未启用/无基准)
+  {
+    uint32_t base = uiScreenOffAt() ? uiScreenOffAt() : uiLastTouchAt();
+    uint32_t due  = (uint32_t)g_powerOffMin * 60000UL;
+    uint32_t el   = base ? (millis() - base) : 0;
+    j["offBase"]  = (unsigned)base;
+    j["offDueMs"] = (unsigned)due;
+    j["offLeftS"] = (g_powerOffMin > 0 && g_autoPowerOff && base)
+                      ? (int)((el >= due) ? 0 : (due - el) / 1000UL) : -1;
+    j["screenOffAt"] = (unsigned)uiScreenOffAt();
+    j["lastTouchAt"] = (unsigned)uiLastTouchAt();
+  }
 
   // 股票
   j["stockCount"] = (int)g_nStock;
@@ -904,6 +1059,44 @@ static void handleSettings(AsyncWebServerRequest* r, String& body) {
     if (p > 20.0f) p = 20.0f;
     g_alertPct = p;
   }
+  // ---- v7.1: 两套独立时间范围 [上午起,上午止,下午起,下午止] 单位=分钟 ----
+  if (doc["fetchwin"].is<JsonArray>()) {
+    JsonArray a = doc["fetchwin"].as<JsonArray>();
+    if (a.size() >= 4) {
+      g_fetchWin = { (uint16_t)constrain((int)a[0], 0, 1439),
+                     (uint16_t)constrain((int)a[1], 0, 1439),
+                     (uint16_t)constrain((int)a[2], 0, 1439),
+                     (uint16_t)constrain((int)a[3], 0, 1439) };
+      cfgSanitizeWindow(g_fetchWin);
+    }
+  }
+  if (doc["alertwin"].is<JsonArray>()) {
+    JsonArray a = doc["alertwin"].as<JsonArray>();
+    if (a.size() >= 4) {
+      g_alertWin = { (uint16_t)constrain((int)a[0], 0, 1439),
+                     (uint16_t)constrain((int)a[1], 0, 1439),
+                     (uint16_t)constrain((int)a[2], 0, 1439),
+                     (uint16_t)constrain((int)a[3], 0, 1439) };
+      cfgSanitizeWindow(g_alertWin);
+    }
+  }
+  if (!doc["twkd"].isNull())  g_workdayOnly  = ((int)doc["twkd"]) ? 1 : 0;
+  if (!doc["ftout"].isNull()) g_fetchOutside = ((int)doc["ftout"]) ? 1 : 0;
+  if (!doc["aswsec"].isNull()) {
+    int v = constrain((int)doc["aswsec"], 0, 120);
+    if (v != 0 && v != 10 && v != 20 && v != 30 && v != 60 && v != 120) v = 30;
+    g_autoSwitchSec = (uint8_t)v;
+  }
+  // 每股独立阈值: 0=跟随全局 / 1..20=独立 / -1=该股禁用
+  if (doc["altper"].is<JsonArray>()) {
+    JsonArray a = doc["altper"].as<JsonArray>();
+    for (int i = 0; i < MAX_STOCKS && i < (int)a.size(); i++) {
+      float v = (float)a[i];
+      if (v < 0) v = -1.0f;
+      else if (v > 0) { if (v < 1.0f) v = 1.0f; if (v > 20.0f) v = 20.0f; }
+      g_alertPer[i] = v;
+    }
+  }
   if (!doc["volume"].isNull()) {
     g_volume = constrain((int)doc["volume"], 0, 100);
 #if ENABLE_RADIO
@@ -1010,6 +1203,17 @@ void webLoopHandler() {
   wifiLoop();
   if (s_powerOffAt && millis() > s_powerOffAt) { s_powerOffAt = 0; powerOff(); }
   if (s_otaDone) { s_otaDone = false; delay(400); ESP.restart(); }
+
+  // v7.1 严格 I2C 探测(112 个地址逐一带二次 ACK + 寄存器双读, 约 1~3 秒)
+  if (s_imuReq) {
+    s_imuReq = false;
+    String out;
+    int n = gyroFullScan(out, (int)s_imuPwr);
+    s_imuOut = out;
+    s_imuN   = n;
+    s_imuDone = true;
+    Serial.printf("[IMU] 严格扫描完成 n=%d %s\n", n, out.c_str());
+  }
 
   // WiFi 扫描放在这里(主循环), 不占用 async_tcp 任务, 否则页面会转圈
   if (s_scanReq) {
@@ -1145,6 +1349,31 @@ void webBegin() {
       xSemaphoreGive(s_scanMux);
     }
     r->send(200, "application/json", out);
+  });
+
+  // ---- v7.1 严格姿态传感器探测(验证板上到底有没有加速度计) ----
+  //  触发: GET /api/imu[?pwr=空闲GPIO]  读取: GET /api/imu?get=1
+  //  扫描放主循环, 立即回 started, 页面轮询结果, 不阻塞 async_tcp
+  server.on("/api/imu", HTTP_GET, [](AsyncWebServerRequest* r) {
+    if (!isAuthed(r)) { r->send(401); return; }
+    AsyncJsonResponse* resp = new AsyncJsonResponse();
+    JsonVariant j = resp->getRoot();
+    if (r->hasParam("get")) {
+      j["done"]    = (bool)s_imuDone;
+      j["count"]   = s_imuDone ? s_imuN : 0;
+      j["devices"] = s_imuDone ? s_imuOut : String("");
+      j["note"]    = "每个地址需连续两次 ACK + 0x00/0x0F/0x75 寄存器双读一致; 空列表=板上无 IMU";
+    } else {
+      s_imuDone = false;
+      s_imuOut  = "";
+      s_imuN    = 0;
+      s_imuPwr  = r->hasParam("pwr") ? qs(r, "pwr").toInt() : -1;
+      s_imuReq  = true;
+      j["started"] = true;
+      j["poll"]    = "/api/imu?get=1";
+    }
+    resp->setLength();
+    r->send(resp);
   });
 
   // ---- 关机 ----

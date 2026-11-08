@@ -57,10 +57,8 @@ static void toast(const char* m, uint16_t c = 0xFFFF) { uiToast(m, c, 1500); }
 // ---------------- 翻页/切只 ----------------
 static void stepStock(int dir) {
   if (g_nStock <= 0) return;
-  // DISP_AUTO 时按重力方向决定当前是列表还是单只
-  bool isList = (g_displayMode == DISP_LIST) ||
-                (g_displayMode == DISP_AUTO &&
-                 (gyroRead() == GYRO_LANDSCAPE || gyroRead() == GYRO_UNKNOWN));
+  // v7.1: 统一走 uiEffectiveMode(), DISP_AUTO 由定时切换(或探测到 IMU 时重力)决定
+  bool isList = (uiEffectiveMode() == DISP_LIST);
   if (isList) {
     int pages = uiPageCount();
     if (pages <= 1) return;
@@ -133,7 +131,7 @@ static void menuEnter() {
     cfgSaveSettings();
     uiInvalidate();
     const char* nm = (nx == DISP_LIST) ? "列表 6只/屏" :
-                     (nx == DISP_ONE)  ? "单只大屏" : "重力自动切换";
+                     (nx == DISP_ONE)  ? "单只大屏" : "定时自动切换";
     toast(nm, 0x05BF);
   } else if (sel == MENU_BEEP) {
     beepTest();
@@ -219,6 +217,21 @@ static void handleNewsScene(BtnEvent e) {
   }
 }
 
+// v7.1: 按每只股票的有效阈值统计当前超限只数(全局阈值与独立阈值各自生效)
+static int countAlertHits() {
+  int hit = 0;
+  if (quotesLock(50)) {
+    for (int i = 0; i < g_nStock; i++) {
+      const Quote& q = g_quotes[i];
+      float th = alertThresholdFor(i);
+      if (th > 0 && q.valid && q.chgpct != 0 &&
+          (q.chgpct >= th || q.chgpct <= -th)) hit++;
+    }
+    quotesUnlock();
+  }
+  return hit;
+}
+
 // ---------------- 调节亮度/音量/轮播/涨跌提醒 ----------------
 static void handleAdj(BtnEvent e) {
   bool up   = (e == BTN_R_SHORT || e == BTN_R_LONG);
@@ -232,17 +245,9 @@ static void handleAdj(BtnEvent e) {
       beepAlert();                          // 切换时响一声确认
       uiInvalidate();
       // 即时反馈: 用当前行情扫一遍, 告诉用户开关已生效 + 命中情况
-      int hit = 0;
-      if (quotesLock(50)) {
-        for (int i = 0; i < g_nStock; i++) {
-          const Quote& q = g_quotes[i];
-          if (q.valid && q.chgpct != 0 &&
-              (q.chgpct >= g_alertPct || q.chgpct <= -g_alertPct)) hit++;
-        }
-        quotesUnlock();
-      }
+      int hit = countAlertHits();
       char m[40];
-      if (g_alertOn) snprintf(m, sizeof(m), "提醒已开 当前%d只超%.1f%%", hit, g_alertPct);
+      if (g_alertOn) snprintf(m, sizeof(m), "提醒已开 当前%d只超限", hit);
       else           snprintf(m, sizeof(m), "提醒已关", hit);
       toast(m, g_alertOn ? 0x05BF : 0x8410);
       return;
@@ -313,15 +318,7 @@ static void handleAdj(BtnEvent e) {
     g_alertPct = v;
     cfgSaveSettings();
     // 即时反馈: 用当前行情扫一遍, 让用户看到阈值调节是否"真的生效"
-    int hit = 0;
-    if (quotesLock(50)) {
-      for (int i = 0; i < g_nStock; i++) {
-        const Quote& q = g_quotes[i];
-        if (q.valid && q.chgpct != 0 &&
-            (q.chgpct >= g_alertPct || q.chgpct <= -g_alertPct)) hit++;
-      }
-      quotesUnlock();
-    }
+    int hit = countAlertHits();
     char m[40];
     snprintf(m, sizeof(m), "阈值%.1f%% 当前%d只超限", g_alertPct, hit);
     toast(m, hit > 0 ? 0xFD20 : 0x05BF);
@@ -494,7 +491,7 @@ void loop() {
   // 自动轮播: 列表模式翻页 / 单只模式换只, 间隔 g_jumpSec 秒
   if (g_screenOn && g_scene == SCENE_MAIN && g_nStock > 0 &&
       millis() - s_lastJump > (uint32_t)g_jumpSec * 1000) {
-    if (g_displayMode == DISP_LIST) {
+    if (uiEffectiveMode() == DISP_LIST) {
       if (uiPageCount() > 1) stepStock(+1);
       else s_lastJump = millis();
     } else {
@@ -511,67 +508,102 @@ void loop() {
   //   uiFlashRadioLine();
   // }
 
-  // 重力感应: DISP_AUTO 模式下, 横屏=列表 竖屏=单只
+  // v7.1 自动显示模式: 板上无 IMU(实测 I2C 只有 ES8311), 旧代码算了 want 却从不
+  //   写回, 所以"自动"一直是死的。改为真正可用的定时切换:
+  //   每 g_autoSwitchSec 秒在列表/单只之间切一次。若 /api/imu 真探到 QMI8658,
+  //   gyroPresent() 变 true, 自动改为重力方向优先(横=列表, 竖=单只)。
+  static uint32_t s_autoSwAt = 0;
+  static uint32_t s_gyroAt   = 0;
   static GyroOrientation s_lastOrient = GYRO_UNKNOWN;
-  static uint32_t s_gyroAt = 0;
-  if (g_gyroOn && g_displayMode == DISP_AUTO && g_screenOn &&
-      millis() - s_gyroAt > 500) {
-    s_gyroAt = millis();
-    GyroOrientation o = gyroRead();
-    if (o != GYRO_UNKNOWN && o != s_lastOrient) {
-      s_lastOrient = o;
-      // 横屏(重力在X) -> 列表5只; 竖屏(重力在Y) -> 单只大屏
-      uint8_t want = (o == GYRO_LANDSCAPE) ? DISP_LIST : DISP_ONE;
-      if (g_displayMode == DISP_AUTO) {
-        // 不写回 NVS(这是临时的自动切换, 用户显式选的模式才是持久值)
-        g_curStock = 0;
-        uiInvalidate();
+  if (g_displayMode == DISP_AUTO && g_screenOn) {
+    if (g_gyroOn && gyroPresent()) {
+      if (millis() - s_gyroAt > 500) {
+        s_gyroAt = millis();
+        GyroOrientation o = gyroRead();
+        if (o != GYRO_UNKNOWN && o != s_lastOrient) {
+          s_lastOrient = o;
+          g_autoEffMode = (o == GYRO_LANDSCAPE) ? DISP_LIST : DISP_ONE;
+          g_curStock = 0;
+          uiInvalidate();
+        }
       }
+    } else if (g_autoSwitchSec > 0 &&
+               millis() - s_autoSwAt > (uint32_t)g_autoSwitchSec * 1000UL) {
+      s_autoSwAt = millis();
+      g_autoEffMode = (g_autoEffMode == DISP_LIST) ? DISP_ONE : DISP_LIST;
+      g_curStock = 0;
+      uiInvalidate();
     }
   }
 
-  // 涨跌幅提醒: 交易时段, 任一自选股超阈值 -> 强制单只弹屏(跳动/闪烁) + 滴滴声
-  //   ★ 旧版 s_alertFired 是 static bool, 触发一次后再也不提醒(除非重启),
-  //     这就是"开盘期间没看到提示"的主因之一。改为"按天 + 按股票 + 阈值变化"去重。
+  // v7.1 涨跌幅提醒:
+  //   * 只在「预警提示」时间范围 g_alertWin 内检查(与「信息更新」时段完全独立)
+  //   * 全局阈值 g_alertPct + 每股独立阈值 g_alertPer[i]:
+  //       0=跟随全局 / >0=独立阈值 / <0=该股禁用
+  //   * 去重位按股票单独维护: 改全局阈值只影响"跟随全局"的股票,
+  //     改某只股票的阈值只清它自己的位, 互不影响
+  //   * 每只股票每天最多提醒一次(跨天自动清零), 不再"响一次就整天不响"
   static uint32_t s_alertAt = 0;
   static int      s_alertDay = -1;
   static uint32_t s_alertMask = 0;      // 30 只用 uint32 位图足够
-  static float    s_alertLastPct = -1.0f;
-  if (g_alertOn && isTradingTime() && millis() - s_alertAt > 3000) {
+  static float    s_alertLastVal[MAX_STOCKS];
+  static bool     s_alertValInit = false;
+  if (millis() - s_alertAt > 3000) {
     s_alertAt = millis();
     struct tm tt; int day = -1;
     if (getLocalTime(&tt, 50)) day = tt.tm_yday;
     if (day != s_alertDay) { s_alertDay = day; s_alertMask = 0; }
-    if (s_alertLastPct != g_alertPct) { s_alertLastPct = g_alertPct; s_alertMask = 0; }
 
-    int hitIdx = -1;
-    if (quotesLock(50)) {
+    if (!s_alertValInit) {
+      for (int i = 0; i < MAX_STOCKS; i++) s_alertLastVal[i] = alertThresholdFor(i);
+      s_alertValInit = true;
+    }
+    for (int i = 0; i < MAX_STOCKS; i++) {
+      float v = alertThresholdFor(i);
+      if (s_alertLastVal[i] != v) {
+        s_alertLastVal[i] = v;
+        s_alertMask &= ~(1UL << i);   // 只重置这一只, 其它股票不受影响
+      }
+    }
+
+    if (g_alertOn && isAlertTime() && quotesLock(50)) {
+      int hitIdx = -1;
+      float hitTh = 0;
       for (int i = 0; i < g_nStock && i < 32; i++) {
+        float th = alertThresholdFor(i);
+        if (th <= 0) continue;         // 该股禁用提醒
         const Quote& q = g_quotes[i];
         if (q.valid && q.chgpct != 0 &&
-            (q.chgpct >= g_alertPct || q.chgpct <= -g_alertPct) &&
+            (q.chgpct >= th || q.chgpct <= -th) &&
             !(s_alertMask & (1UL << i))) {
-          hitIdx = i;
+          hitIdx = i; hitTh = th;
           s_alertMask |= (1UL << i);
           break;
         }
       }
       quotesUnlock();
-    }
-    if (hitIdx >= 0) {
-      uiShowAlert(hitIdx, 12000);       // 弹屏 12 秒, 自动退出
-      beepAlert();
-      toast("涨跌超限!", 0xFD20);
+      if (hitIdx >= 0) {
+        uiShowAlert(hitIdx, 12000);    // 弹屏 12 秒, 自动退出
+        beepAlert();
+        char m[48];
+        snprintf(m, sizeof(m), "涨跌超限 %.1f%%", hitTh);
+        toast(m, 0xFD20);
+      }
     }
   }
 
-  // 自动关机: 熄屏后 g_powerOffMin 分钟无任何操作 -> 断电/深睡
-  //   g_powerOffMin=0 表示关闭; 可选 30/60/120/240 分钟。
-  //   任意按键会 uiSetScreen(true) 清零计时, 不会误关。
-  if (g_powerOffMin > 0 && !g_screenOn && uiScreenOffAt() &&
-      millis() - uiScreenOffAt() > (uint32_t)g_powerOffMin * 60000UL) {
-    Serial.println("[SYS] 熄屏超时, 自动关机");
-    powerOff();
+  // v7.1 自动关机(修 2 个实测缺陷):
+  //   ① 旧版要求 !g_screenOn 且只依赖 uiScreenOffAt(); 但任何点亮屏幕的 toast/弹屏
+  //      都会把该计时清零, 30 分钟永远攒不满 -> 表现为"息屏后不关机"。
+  //      改为以「最后一次用户操作」为兜底基准, 熄屏只是省电步骤。
+  //   ② powerOff() 的 ext1 唤醒掩码含常态为 LOW 的 M 键(GPIO4 高电平有效),
+  //      ANY_LOW 会立刻唤醒深睡 -> 看起来像"没关机"(已在 wifi_mgr.cpp 修掉)。
+  if (g_powerOffMin > 0 && g_autoPowerOff && g_scene == SCENE_MAIN) {
+    uint32_t base = uiScreenOffAt() ? uiScreenOffAt() : uiLastTouchAt();
+    if (base && millis() - base > (uint32_t)g_powerOffMin * 60000UL) {
+      Serial.println("[SYS] 无操作超时, 自动关机");
+      powerOff();
+    }
   }
 
   // WiFi 状态机(非阻塞) + 状态变化触发重绘

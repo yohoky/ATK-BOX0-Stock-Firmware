@@ -305,12 +305,16 @@ void powerOff() {
   delay(300);
 
   // 走到这里说明 USB 供电把电源兜住了 -> 退而求其次进深睡
-  // 任意按键(L/M/R 低电平)唤醒
-  Serial.println("[SYS] USB 供电, 进入深睡(按任意键唤醒)");
-  esp_sleep_enable_ext1_wakeup((1ULL << PIN_BTN_L) | (1ULL << PIN_BTN_M) | (1ULL << PIN_BTN_R),
+  // ★ v7.1 关键修复: M 键(GPIO4)是【高电平有效】, 未按下时常态 LOW(诊断 btnPinM=0)。
+  //   旧版把 M 键放进 ESP_EXT1_WAKEUP_ANY_LOW 掩码, 深睡一进去就因 M 键常态
+  //   低电平立刻满足唤醒条件 -> 设备瞬间重启, 表现为"息屏后没自动关机"。
+  //   改为只用 L(GPIO3)/R(GPIO0) 两个低有效按键做唤醒; 电池真断电时 M 键是
+  //   硬件电源键, 按下即可上电开机, 不需要 RTC 唤醒。
+  Serial.println("[SYS] USB 供电, 进入深睡(按左/右键唤醒)");
+  esp_sleep_enable_ext1_wakeup((1ULL << PIN_BTN_L) | (1ULL << PIN_BTN_R),
                                ESP_EXT1_WAKEUP_ANY_LOW);
   rtc_gpio_pullup_en((gpio_num_t)PIN_BTN_L);
-  rtc_gpio_pullup_en((gpio_num_t)PIN_BTN_M);
   rtc_gpio_pullup_en((gpio_num_t)PIN_BTN_R);
+  rtc_gpio_hold_dis((gpio_num_t)PIN_BTN_M);   // 别让 M 键残留 RTC 配置
   esp_deep_sleep_start();
 }

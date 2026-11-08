@@ -9,13 +9,16 @@
 #define STA_URL_LEN   128
 #define STK_CODE_LEN  14
 
+// v7.1: 信息更新/预警提示两套独立时间范围 / 每只股票独立提醒阈值(互不影响)
+//       / 修自动关机(M键常态低电平误唤醒) / 自动显示模式改为真正可用的定时切换
+//       / 状态栏已连WiFi只留图标 / 完整 merged 固件
 // v7.0: 多组 WiFi 凭据自动漫游 / 状态栏 6 项 / 三键操作重设计 / 网页全接口+升级菜单
 //       / 出厂默认音量 60 / 网页 OTA 实测可用
 // v6.2: 盒子菜单补全设置项 / 自动关机 4 档 / 音量默认30+状态栏显示 / 提示音温和化
 // v6.1.1: 修 Web load() 访问已删除的电台控件导致设置项加载不全
 // v6.1: 修 ES8311 0x32 音量(本机无声) / 去掉 beep 时 CODEC_PWR 断电毛刺(USB 重枚举)
 //       / M 键高电平有效 / 电池官方标定 / I2C 假地址
-#define FW_VERSION    "v7.0"
+#define FW_VERSION    "v7.1"
 
 // 电台功能开关: 用户反馈在线电台在本网络下播不出声音, 已停用(2026-11)
 //   代码与网页接口保留, 改成 1 重新编译即可恢复
@@ -29,10 +32,21 @@
 // 股票显示模式
 #define DISP_ONE      0    // 单只大屏: 大字现价 + 涨跌 + 开高低额
 #define DISP_LIST     1    // 列表模式(默认): 一屏 6 只, 每 g_jumpSec 秒自动翻页
-#define DISP_AUTO     2    // 自动: 重力感应(竖=单只, 横=列表)
+#define DISP_AUTO     2    // 自动: 定时在列表/单只间切换(板上无IMU, 重力不可用)
 // 配置结构版本: 结构/长度一改就 +1, cfgLoad 发现不匹配会重置列表,
 // 避免旧 NVS 二进制按新结构解读成乱码(中文变"锟斤拷")
-#define CFG_VER       7   // 7: 默认自选股更新为 13 只(含 ETF)
+#define CFG_VER       8   // 8: 默认自选股对齐实测盒子 14 只(新增 sz399006 创业板指)
+
+// ---- v7.1 时间范围 ----
+// 每个窗口 = 上午起/上午止/下午起/下午止, 单位: 当日 0 点起的分钟数(0..1439)
+// 默认 9:00-11:30 / 13:00-15:00
+struct TimeWindow {
+  uint16_t amS, amE, pmS, pmE;
+};
+#define TW_DEF_AM_S  540    // 9:00
+#define TW_DEF_AM_E  690    // 11:30
+#define TW_DEF_PM_S  780    // 13:00
+#define TW_DEF_PM_E  900    // 15:00
 
 struct Station {
   char name[STA_NAME_LEN];
@@ -103,11 +117,23 @@ extern uint8_t  g_newsOn;      // 1=底部显示新闻条, 0=不显示
 extern uint8_t  g_newsSec;     // 每条新闻停留秒数(3-30)
 extern uint16_t g_newsRefSec;  // 重新抓取的间隔秒数(60-3600)
 extern uint8_t  g_newsSrc;     // 0=财经+科技 1=只看财经 2=只看科技
+// ---- v7.1 两套独立时间范围 ----
+extern TimeWindow g_fetchWin;   // 「信息更新」时段: 该时段内按 refresh 秒抓行情
+extern TimeWindow g_alertWin;   // 「预警提示」时段: 该时段内才检查涨跌阈值并响铃
+extern uint8_t  g_workdayOnly;  // 1=时间范围只在周一~周五生效(默认), 0=每天生效
+extern uint8_t  g_fetchOutside; // 0=时段外完全不抓(默认), 1=时段外每 300 秒抓一次
+
 // ---- 涨跌幅提醒 ----
-extern uint8_t  g_alertOn;     // 1=开启涨跌提醒, 0=关
-extern float    g_alertPct;    // 触发阈值(百分比, 默认 4.0)
-// ---- 重力感应 ----
-extern uint8_t  g_gyroOn;      // 1=重力自动切换显示模式(DISP_AUTO 时生效)
+extern uint8_t  g_alertOn;     // 总开关: 1=开启提醒, 0=关
+extern float    g_alertPct;    // 全局触发阈值(百分比, 出厂 3.0 对齐实测盒子)
+// 每只股票独立阈值: 0=跟随全局, >0=独立阈值(1..20), <0=该股不提醒
+// 改全局阈值只重置"跟随全局"的股票去重位; 改某只股票只重置它自己的位, 互不影响。
+extern float    g_alertPer[MAX_STOCKS];
+
+// ---- 自动显示模式 ----
+extern uint8_t  g_gyroOn;      // 保留: 若以后外接 IMU, 1=优先用重力方向
+extern uint8_t  g_autoSwitchSec; // DISP_AUTO 时每 N 秒在列表/单只间切换; 0=不切换
+extern uint8_t  g_autoEffMode;   // 运行时实际显示模式(不落盘)
 extern Station  g_stations[MAX_STATIONS];
 extern uint8_t  g_nStation;
 extern int8_t   g_curStation;  // 当前电台索引
@@ -137,4 +163,9 @@ extern volatile int  g_curStock;     // 轮播当前索引
 // 工具
 String GBKtoUTF8(const uint8_t* gbk, int len);
 bool utf8Valid(const uint8_t* s, int len);
-bool isTradingTime();
+// v7.1: 时间范围校验/钳位 + 两套窗口判断
+void cfgSanitizeWindow(TimeWindow& w);
+bool inTimeWindow(const TimeWindow& w);
+bool isTradingTime();          // = inTimeWindow(g_fetchWin), 兼容旧调用点
+bool isAlertTime();            // = inTimeWindow(g_alertWin)
+float alertThresholdFor(int i);// 每股有效阈值; <0 表示该股禁用提醒

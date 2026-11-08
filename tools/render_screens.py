@@ -91,7 +91,7 @@ STOCKS = [
 
 
 def statusbar(d):
-    """v7.0 状态栏 6 项: 星期 / 时间 / 页码 / 音量 / 电量 / WiFi(模式)"""
+    """v7.1 状态栏 6 项: 星期 / 时间 / 页码 / 音量 / 电量 / WiFi(已连接只显示图标)"""
     rect(d, 0, 0, W, 19, fill="#05070A")
     text(d, 3, 2, "周日", 10, FG)
     text(d, 42, 2, "00:12", 10, FG)
@@ -108,11 +108,10 @@ def statusbar(d):
     rect(d, bx + 2, by + 2, bw - 4, bh - 4, fill=DIM)
     rect(d, bx + 2, by + bh - 4, bw - 4, 2, fill=DOWN)
     text(d, bx + bw / 2, by + bh / 2 - 1, "100", 7, FG, bold=True, anchor="mm")
-    # WiFi 小信号 + 模式字
+    # v7.1: 已连接只显示缩小的 3 格信号, 不再带「连」字; 中/热 才带一个汉字
     for i in range(3):
         h = 3 + i * 4
-        rect(d, 206 + i * 4, 16 - h, 3, h, fill=ACC if i < 3 else LINE)
-    text(d, 220, 2, "连", 10, ACC)
+        rect(d, 210 + i * 4, 16 - h, 3, h, fill=ACC if i < 3 else LINE)
     line(d, 0, 19, W, 19, LINE)
 
 
@@ -161,7 +160,7 @@ def draw_menu():
     rect(d, 0, 0, W, 24, fill="#141A22")
     text(d, 8, 4, "菜单", 13, FG, bold=True)
     text(d, 232, 6, "M长按退出", 8, FLAT, anchor="ra")
-    vals = ["列表 6只/屏", "5 秒", "6 秒", "开 4.0%", "息屏后30分", "30%", "60"]
+    vals = ["列表 6只/屏", "5 秒", "5 秒", "开 3.0%", "息屏后30分", "30%", "60"]
     for i, nm in enumerate(MENU):
         y = 28 + i * 27
         if i == 0:
@@ -197,11 +196,11 @@ def draw_statusbar_zoom():
         d.line([(x + 6) * scale, 19 * scale, label_x * scale / 5 * 5, 19 * scale + 16], fill=c, width=2)
     # 用绝对像素写标注
     labels = [("① 星期", 10), ("② 时间", 175), ("③ 页码", 340),
-              ("④ 音量", 505), ("⑤ 电量 60-100 绿", 665), ("⑥ WiFi 信号/模式", 855)]
+              ("④ 音量", 505), ("⑤ 电量 60-100 绿", 665), ("⑥ WiFi 仅图标", 855)]
     for (lb, px), c in zip(labels, col):
         d.text((px, 19 * scale + 24), lb, font=ImageFont.truetype(FONT_B, 17), fill=c)
     d.text((10, 19 * scale + 58),
-           "六项固定显示：星期 · 时间 · 第几页 · 音量(喇叭图标+数字) · 电量(电池内数字) · WiFi 信号(连/中/热)",
+           "六项固定显示：星期 · 时间 · 第几页 · 音量(喇叭图标+数字) · 电量(电池内数字) · WiFi 信号(已连接只显示图标)",
            font=ImageFont.truetype(FONT_R, 15), fill=FLAT)
     p = os.path.join(OUT, "ui_statusbar.png")
     im.save(p, optimize=True)
@@ -218,7 +217,7 @@ def draw_web():
     d = ImageDraw.Draw(im)
     rect(d, 10, 10, 500, 44, fill="#1B1B1B", outline="#2A2A2A", radius=10)
     text(d, 22, 20, "BOX0 股票固件 · 管理页", 13, FG, bold=True)
-    text(d, 498, 22, "v7.0", 9, FLAT, anchor="ra")
+    text(d, 498, 22, "v7.1", 9, FLAT, anchor="ra")
     tabs = ["股票", "设置", "设备", "升级"]
     for i, t in enumerate(tabs):
         x = 10 + i * 126
@@ -227,15 +226,15 @@ def draw_web():
         text(d, x + 60, 69, t, 11, "#FFFFFF" if on else "#999999", bold=on, anchor="ma")
     rect(d, 10, 102, 500, 74, fill="#1B1B1B", radius=10)
     text(d, 22, 112, "固件升级（网页 OTA）", 12, FG, bold=True)
-    text(d, 22, 134, "当前固件 v7.0  ·  选择 .bin 上传，约 8 秒自动重启", 9, FLAT)
+    text(d, 22, 134, "当前固件 v7.1  ·  选择 .bin 上传，约 12 秒自动重启", 9, FLAT)
     text(d, 22, 152, "不用插 USB / 不用下载模式 / 不用按 RESET", 9, ACC)
     rect(d, 10, 186, 500, 34, fill="#1A1A1A", outline="#333333", radius=8)
-    text(d, 22, 194, "选择文件   box0_stock_v7.0.bin", 9, FLAT)
+    text(d, 22, 194, "选择文件   box0_stock_v7.1.bin", 9, FLAT)
     rect(d, 10, 228, 500, 34, fill=SEL, radius=8)
     text(d, 260, 236, "上传并升级", 11, "#FFFFFF", bold=True, anchor="ma")
     rect(d, 10, 276, 500, 40, fill="#1B1B1B", radius=10)
     text(d, 22, 286, "全部接口（点击即调用）", 11, FG, bold=True)
-    text(d, 22, 303, "/api/cfg   /api/diag   /api/scan   /api/beep   ...", 8, ACC)
+    text(d, 22, 303, "/api/cfg  /api/diag  /api/imu  /api/scan  /api/beep ...", 8, ACC)
     text(d, 10, 326, "已保存的 WiFi（最多 8 组 · 自动漫游 · 支持无密码）", 11, FG, bold=True)
     for i, (nm, mark) in enumerate([("Home-2.4G", "★ 当前"), ("Office-Guest", "开放"), ("Coffee-5G", "")]):
         y = 348 + i * 34
@@ -246,9 +245,13 @@ def draw_web():
     rect(d, 10, 460, 500, 120, fill="#111111", outline="#333333", radius=8)
     text(d, 22, 470, "GET /api/diag  ->  HTTP 200", 8, "#9CCC9C")
     text(d, 22, 488, "{", 8, "#9CCC9C")
-    for i, ln in enumerate(['  "fw": "v7.0",', '  "volume": 60,',
-                            '  "wifiProfileN": 3,', '  "batPct": 100']):
+    for i, ln in enumerate(['  "fw": "v7.1",', '  "inAlertWin": true,',
+                            '  "fetchWin": [540,690,780,900],', '  "alertEffective": [3,3,2.5,...]']):
         text(d, 34, 502 + i * 15, ln, 8, "#9CCC9C")
+    rect(d, 10, 588, 500, 62, fill="#1B1B1B", radius=10)
+    text(d, 22, 596, "信息更新 / 预警提示 时段（可分别设置）", 10, FG, bold=True)
+    text(d, 22, 616, "上午 09:00–11:30   下午 13:00–15:00   ·   仅工作日", 9, ACC)
+    text(d, 22, 634, "全局阈值 3%  ·  每只股票独立阈值  ·  提醒总开关", 9, FLAT)
     p = os.path.join(OUT, "ui_web.png")
     im.save(p, optimize=True)
     print("  ->", p)
@@ -265,11 +268,11 @@ def draw_overview():
     Ftag = ImageFont.truetype(FONT_R, 18)
     d.text((56, 60), "正点原子 BOX0 股票固件", font=Fbig, fill="#FFFFFF")
     d.text((58, 130), "ESP32-S3 · 240×240 桌面行情终端 · 网页管理 · OTA 升级", font=Fsub, fill=ACC)
-    feats = ["• 13+ 自选股，红涨绿跌，单只 / 列表一键切换",
-             "• 8 组历史 WiFi 自动漫游，支持无密码开放网络",
-             "• 状态栏 6 项：星期 / 时间 / 页码 / 音量 / 电量 / WiFi",
-             "• 涨跌提醒弹屏 + 温和提示音，自动熄屏与关机",
-             "• 全部设置可在本机菜单或网页完成，网页一键 OTA"]
+    feats = ["• 14 只默认自选股，红涨绿跌，单只 / 列表一键切换",
+             "• 信息更新 / 预警提示两套可配时间窗口（默认交易时段）",
+             "• 全局 + 每只股票独立提醒阈值，互不干扰，可一键关闭",
+             "• 8 组历史 WiFi 自动漫游，状态栏 6 项，支持无密码网络",
+             "• 完整固件 0x0 一键刷入 + 网页 OTA 日常升级"]
     for i, f in enumerate(feats):
         d.text((58, 200 + i * 42), f, font=Ftag, fill="#B9C4CF")
     d.text((58, 470), "M 短按切显示  ·  M 长按进菜单  ·  网页「升级」一键 OTA", font=Fsub, fill=SEL)

@@ -158,7 +158,7 @@ static const char* menuValue(int i, char* buf, int n) {
   switch (i) {
     case MENU_DISP:
       return g_displayMode == DISP_LIST ? "列表" :
-             g_displayMode == DISP_ONE  ? "单只" : "自动";
+             g_displayMode == DISP_ONE  ? "单只" : "定时";
     case MENU_JUMP:     snprintf(buf, n, "%d 秒", g_jumpSec);    return buf;
     case MENU_REFRESH:  snprintf(buf, n, "%d 秒", g_refreshSec); return buf;
     case MENU_ALERT:
@@ -274,12 +274,16 @@ int uiPageCount() {
 }
 
 // 当前实际渲染模式: DISP_AUTO 时按重力方向解析成单只/列表
-static uint8_t effectiveMode() {
+// v7.1: 导出给主循环共用。板上实测无 IMU 时, DISP_AUTO 由 g_autoEffMode
+//   (主循环按 g_autoSwitchSec 定时在列表/单只间切换)决定 —— 旧版这里永远返回
+//   DISP_LIST, 所以"自动切换显示模式"一直是死的。
+uint8_t uiEffectiveMode() {
   if (g_displayMode != DISP_AUTO) return g_displayMode;
-  if (!g_gyroOn) return DISP_LIST;               // 没开重力 -> 默认列表
-  GyroOrientation o = gyroRead();
-  if (o == GYRO_UNKNOWN) return DISP_LIST;        // 传感器不在 -> 列表
-  return (o == GYRO_LANDSCAPE) ? DISP_LIST : DISP_ONE;
+  if (g_gyroOn && gyroPresent()) {
+    GyroOrientation o = gyroRead();
+    if (o != GYRO_UNKNOWN) return (o == GYRO_LANDSCAPE) ? DISP_LIST : DISP_ONE;
+  }
+  return g_autoEffMode;
 }
 
 // ---------------- 无网引导/失败页 ----------------
@@ -521,7 +525,7 @@ static void drawStatusBar() {
   // 3 第几页(列表=页/总页, 单只=第几只/总只数)
   {
     char pg[12];
-    if (effectiveMode() == DISP_LIST) {
+    if (uiEffectiveMode() == DISP_LIST) {
       int pages = uiPageCount();
       int page = g_curStock / UI_LIST_ROWS;
       if (page >= pages) page = pages - 1;
@@ -581,9 +585,11 @@ static void drawStatusBar() {
       uint16_t c = (ok && rssi > (-88 + i * 12)) ? sc : 0x2120;
       disp().fillRect(wx + i * 4, 16 - h, 3, h, c);
     }
-    const char* mode = ok ? "连" :
-                       (g_wifiState == WIFI_CONNECTING ? "中" : "热");
-    drawCN(disp(), wx + 14, 1, mode, sc);
+    // v7.1: 正常连接只显示信号格图标, 不再画"连"字; 其它模式仍用文字提示
+    if (!ok) {
+      const char* mode = (g_wifiState == WIFI_CONNECTING) ? "中" : "热";
+      drawCN(disp(), wx + 14, 1, mode, sc);
+    }
   }
 }
 
@@ -665,8 +671,13 @@ static void drawMenu() {
       disp().setTextColor(C_FG, C_BG);
       disp().drawString(b, 120, 140);
       disp().setTextDatum(lgfx::top_left);
-      drawCN(disp(), 20, 170, "左/右键  调阈值", C_FLAT);
+      drawCN(disp(), 20, 170, "左/右键 调全局阈值", C_FLAT);
       drawCN(disp(), 20, 194, "M键=开关 长按回主屏", C_FLAT);
+      int perN = 0;
+      for (int i = 0; i < g_nStock; i++) if (g_alertPer[i] != 0) perN++;
+      char pb[32];
+      snprintf(pb, sizeof(pb), "独立阈值%d只 网页可设", perN);
+      drawCN(disp(), 20, 216, pb, C_ACCENT);
       return;
     }
     int v, vmax;
@@ -816,10 +827,22 @@ static void drawInfo() {
            (unsigned)(g_radioBitrate / 1000), (unsigned)g_radioSec);
   drawCN(disp(), 6, y, b, C_FLAT); y += 18;
 #else
-  snprintf(b, sizeof(b), "重力 %s  提醒 %s",
-           g_gyroOn ? (gyroPresent() ? "在线" : "未发现") : "已关",
-           g_alertOn ? "开" : "关");
+  int perN = 0;
+  for (int i = 0; i < g_nStock; i++) if (g_alertPer[i] != 0) perN++;
+  snprintf(b, sizeof(b), "提醒%s %.1f%% 独立%d只",
+           g_alertOn ? "开" : "关", g_alertPct, perN);
   drawCN(disp(), 6, y, b, C_FLAT); y += 18;
+  // v7.1: 信息页直接显示两套时间范围, 便于不连网页也能核对
+  snprintf(b, sizeof(b), "更新%u:%02u-%u:%02u/%u-%u",
+           g_fetchWin.amS / 60, g_fetchWin.amS % 60,
+           g_fetchWin.amE / 60, g_fetchWin.amE % 60,
+           g_fetchWin.pmS / 60, g_fetchWin.pmE / 60);
+  drawCN(disp(), 6, y, b, C_FG); y += 18;
+  snprintf(b, sizeof(b), "预警%u:%02u-%u:%02u/%u-%u",
+           g_alertWin.amS / 60, g_alertWin.amS % 60,
+           g_alertWin.amE / 60, g_alertWin.amE % 60,
+           g_alertWin.pmS / 60, g_alertWin.pmE / 60);
+  drawCN(disp(), 6, y, b, C_FG); y += 18;
 #endif
 
   snprintf(b, sizeof(b), "音量%d 亮度%d %s", g_volume, g_bright,
@@ -893,7 +916,7 @@ static void drawAll() {
 
   // 列表 + 单行精灵模式: 每行自己整行覆盖, 不需要(也不应该)整屏擦黑,
   // 否则翻页时先黑一下再出字, 看着像闪屏
-  uint8_t eff = effectiveMode();
+  uint8_t eff = uiEffectiveMode();
   bool rowPath = (sc == SCENE_MAIN) && (eff == DISP_LIST) &&
                  !hint && s_rowSpr && !s_sprOk;
   if (!rowPath) frameClear();
@@ -931,6 +954,7 @@ void uiInvalidate()      { s_dirty = true; }
 void uiFlashRadioLine()  { s_radioDirty = true; }
 void uiShowVolume()      { s_volUntil = millis() + 2000; s_radioDirty = true; }
 void uiTouch()           { s_lastTouch = millis(); }
+uint32_t uiLastTouchAt() { return s_lastTouch; }   // v7.1 自动关机兜底基准
 
 // 旧滚动行情条已取消: 一屏多只已经能看到全部自选股, 不需要跑马灯
 void uiRedrawTicker() { s_dirty = true; }

@@ -102,3 +102,7 @@ bool uiAlertActive();
 void uiClearAlert();
 // 最近一次熄屏时刻(0=亮屏), 供主循环做"熄屏后 N 分钟自动关机"
 uint32_t uiScreenOffAt();
+// 最后一次用户操作时刻(自动关机兜底基准, v7.1)
+uint32_t uiLastTouchAt();
+// DISP_AUTO 解析后的实际显示模式: 有 IMU 用重力, 否则用 g_autoEffMode(定时切换)
+uint8_t  uiEffectiveMode();

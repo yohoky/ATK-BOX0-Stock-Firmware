@@ -34,3 +34,9 @@ uint8_t gyroAddr();
 // 诊断: 扫描当前 I2C 总线(SDA=11/SCL=12)上所有从机地址。
 //   返回发现的设备数, 地址写入 out(最多 maxN 个)。
 int gyroI2CScan(uint8_t* out, int maxN);
+
+// v7.1 决定性验证: 严格全总线探测 0x08..0x77。
+//   每个地址要连续两次 ACK + 两次寄存器读一致才算真设备, 过滤掉弱上拉造成的幽灵 ACK。
+//   out 格式 "0x18:00=80/0F=00/75=00;..." (0xFF=该寄存器读不到)。
+//   返回确认存在的从机数。pwrPin>=0 时先临时拉高该 GPIO 再扫(用于排查需单独供电的传感器)。
+int gyroFullScan(String& out, int pwrPin = -1);

@@ -8,10 +8,10 @@ char    g_wifiPass[65] = "";
 char    g_adminPass[17] = "123456";
 uint8_t g_volume = 60;   // v7.0 出厂默认 60(提示音已温和化, 30 偏小)
 uint8_t g_bright = 30;       // 出厂默认 30%(用户 2026-11-07 指定, 省电不刺眼)
-uint8_t g_autoOffMin = 0;    // 0 = 不自动熄屏
+uint8_t g_autoOffMin = 1;    // v7.1 对齐实测盒子: 1 分钟无操作熄屏
 uint8_t g_autoPowerOff = 1;  // 默认开启自动关机
 uint8_t g_powerOffMin = 30;  // 熄屏后 30 分钟无操作自动关机
-uint8_t g_refreshSec = 6;
+uint8_t g_refreshSec = 5;    // 对齐实测盒子
 uint8_t g_jumpSec = 5;
 uint8_t g_displayMode = DISP_LIST;
 // 新闻条默认: 开, 8 秒一条, 10 分钟抓一次, 财经+科技混合
@@ -19,11 +19,19 @@ uint8_t  g_newsOn     = 1;
 uint8_t  g_newsSec    = 8;
 uint16_t g_newsRefSec = 600;
 uint8_t  g_newsSrc    = 0;
-// 涨跌提醒: 默认开, 阈值 4%
+// ---- v7.1 两套独立时间范围: 默认 9:00-11:30 / 13:00-15:00 ----
+TimeWindow g_fetchWin = { TW_DEF_AM_S, TW_DEF_AM_E, TW_DEF_PM_S, TW_DEF_PM_E };
+TimeWindow g_alertWin = { TW_DEF_AM_S, TW_DEF_AM_E, TW_DEF_PM_S, TW_DEF_PM_E };
+uint8_t  g_workdayOnly  = 1;   // 仅周一~周五生效
+uint8_t  g_fetchOutside = 0;   // 时段外不抓行情
+// 涨跌提醒: 默认开, 全局阈值 3%(对齐实测盒子)
 uint8_t  g_alertOn    = 1;
-float    g_alertPct   = 4.0f;
-// 重力感应: 默认开
-uint8_t  g_gyroOn     = 1;
+float    g_alertPct   = 3.0f;
+float    g_alertPer[MAX_STOCKS] = {0};  // 0=跟随全局, >0=独立, <0=该股禁用
+// 自动显示模式(板上无 IMU, 用定时切换; 若探测到 IMU 则重力优先)
+uint8_t  g_gyroOn        = 1;
+uint8_t  g_autoSwitchSec = 30;
+uint8_t  g_autoEffMode   = DISP_LIST;
 
 Station g_stations[MAX_STATIONS];
 uint8_t g_nStation = 0;
@@ -43,6 +51,17 @@ volatile int  g_curStock = 0;
 // 音量待落盘标记(见 cfgFlushVolume)
 static volatile bool s_volDirty = false;
 static uint32_t s_volChangeAt = 0;
+
+// v7.1: 时间窗口钳位。分钟数 0..1439, 起必须早于止(至少 15 分钟), 非法回落默认。
+void cfgSanitizeWindow(TimeWindow& w) {
+  TimeWindow def = { TW_DEF_AM_S, TW_DEF_AM_E, TW_DEF_PM_S, TW_DEF_PM_E };
+  auto fix = [](uint16_t& s, uint16_t& e, uint16_t ds, uint16_t de) {
+    if (s > 1439 || e > 1439 || s >= e || e - s < 15) { s = ds; e = de; }
+  };
+  fix(w.amS, w.amE, def.amS, def.amE);
+  fix(w.pmS, w.pmE, def.pmS, def.pmE);
+  // 下午窗口不能早于上午窗口(允许重叠但不允许倒挂太多, 保持简单: 不强制)
+}
 
 // ★ Preferences 不是可重入的: 网页(async_tcp 任务)和主循环会同时写,
 //   不加锁偶发把 NVS 写坏 -> 重启后配置变乱码/丢电台。所有写操作走这把锁。
@@ -65,6 +84,7 @@ static const char* DEF_STOCKS[] = {
   "sz002657",    // 中科金财
   "sz300215",    // 电科院
   "sz002439",    // 启明星辰
+  "sz399006",    // 创业板指 (v7.1: 对齐实测盒子 14 只)
 };
 // ── 内置电台(2026-11 实测可播, 全部走 http 明文, ESP32 上省内存/出音快) ──
 //    来源: radio-browser 中国区点播榜 + 逐个 range 请求验证(HTTP 200, audio/mpeg 或 aacp)
@@ -222,17 +242,34 @@ void cfgLoad() {
   g_newsSec    = prefs.getUChar("nssec", 8);
   g_newsRefSec = prefs.getUShort("nsref", 600);
   g_newsSrc    = prefs.getUChar("nssrc", 0);
-  // ---- 涨跌提醒 + 重力 ----
-  g_alertOn    = prefs.getUChar("alton", 1);
-  g_alertPct   = prefs.getFloat("altpct", 4.0f);
-  g_gyroOn     = prefs.getUChar("gyro", 1);
-  // 默认"列表模式"; 老固件可能存过 DISP_ONE, 用一次性版本键升级过来
+  // ---- v7.1: 两套独立时间范围 ----
+  if (prefs.getBytes("fwin", &g_fetchWin, sizeof(g_fetchWin)) != sizeof(g_fetchWin))
+    g_fetchWin = { TW_DEF_AM_S, TW_DEF_AM_E, TW_DEF_PM_S, TW_DEF_PM_E };
+  if (prefs.getBytes("awin", &g_alertWin, sizeof(g_alertWin)) != sizeof(g_alertWin))
+    g_alertWin = { TW_DEF_AM_S, TW_DEF_AM_E, TW_DEF_PM_S, TW_DEF_PM_E };
+  cfgSanitizeWindow(g_fetchWin);
+  cfgSanitizeWindow(g_alertWin);
+  g_workdayOnly  = prefs.getUChar("twkd",  1) ? 1 : 0;
+  g_fetchOutside = prefs.getUChar("ftout", 0) ? 1 : 0;
+  // ---- 涨跌提醒 ----
+  g_alertOn  = prefs.getUChar("alton", 1);
+  g_alertPct = prefs.getFloat("altpct", 3.0f);
+  // 每股阈值: 旧设备没有这个键 -> 全 0(全部跟随全局), 行为与旧版一致
+  if (prefs.getBytes("altper", g_alertPer, sizeof(g_alertPer)) != sizeof(g_alertPer))
+    memset(g_alertPer, 0, sizeof(g_alertPer));
+  for (int i = 0; i < MAX_STOCKS; i++) {
+    if (g_alertPer[i] > 20.0f || g_alertPer[i] < -1.0f || isnan(g_alertPer[i]))
+      g_alertPer[i] = 0;
+  }
+  // ---- 自动显示模式 ----
+  g_gyroOn        = prefs.getUChar("gyro", 1);
+  g_autoSwitchSec = prefs.getUChar("aswsec", 30);
+  if (g_autoSwitchSec > 120) g_autoSwitchSec = 30;
+  g_autoEffMode = DISP_LIST;
+  // 默认"列表模式"; v7.1 不再把老设备强制改成 DISP_AUTO(板上无IMU, 那个选项曾无效)
   g_displayMode = prefs.getUChar("dsp", DISP_LIST);
   if (g_displayMode > DISP_AUTO) g_displayMode = DISP_LIST;
-  if (prefs.getUChar("uiver", 0) < 6) {
-    prefs.putUChar("uiver", 6);
-    g_displayMode = DISP_AUTO;      // v6 起默认"重力自动"切换
-  }
+  if (prefs.getUChar("uiver", 0) < 7) prefs.putUChar("uiver", 7);
 
   // ---- 脏数据保护: NVS 写坏/旧版本残留时钳到合法区间, 否则会黑屏或秒切台 ----
   g_wifiSsid[32] = 0;  g_wifiPass[64] = 0;  g_adminPass[16] = 0;
@@ -256,7 +293,9 @@ void cfgLoad() {
   if (g_newsRefSec < 60)   g_newsRefSec = 600;   // 1 分钟以内太费流量
   if (g_newsRefSec > 3600) g_newsRefSec = 3600;
   if (g_newsSrc > NEWS_SRC - 1) g_newsSrc = 0;  if (g_alertOn > 1)   g_alertOn = 1;
-  if (g_alertPct < 1.0f || g_alertPct > 20.0f) g_alertPct = 4.0f;
+  if (g_alertPct < 1.0f || g_alertPct > 20.0f) g_alertPct = 3.0f;
+  if (g_workdayOnly > 1) g_workdayOnly = 1;
+  if (g_fetchOutside > 1) g_fetchOutside = 1;
   if (g_gyroOn > 1)    g_gyroOn = 1;
   if (g_volume > 100)  g_volume = 60;   // v7.0 出厂默认 60(提示音已温和化, 30 偏小)
 
@@ -320,7 +359,13 @@ void cfgSaveSettings() {
   prefs.putUChar("nssrc", g_newsSrc);
   prefs.putUChar("alton", g_alertOn);
   prefs.putFloat("altpct", g_alertPct);
+  prefs.putBytes("altper", g_alertPer, sizeof(g_alertPer));
   prefs.putUChar("gyro", g_gyroOn);
+  prefs.putUChar("aswsec", g_autoSwitchSec);
+  prefs.putBytes("fwin", &g_fetchWin, sizeof(g_fetchWin));
+  prefs.putBytes("awin", &g_alertWin, sizeof(g_alertWin));
+  prefs.putUChar("twkd",  g_workdayOnly);
+  prefs.putUChar("ftout", g_fetchOutside);
   prefs.putChar("cursta", g_curStation);
   cfgUnlock();
 }
@@ -356,21 +401,28 @@ void cfgFactoryReset() {
   memset(g_wifiProfiles, 0, sizeof(g_wifiProfiles));
   g_wifiProfileN = 0;
   strcpy(g_adminPass, "123456");
-  g_volume = 60;   // v7.0 出厂默认 60(提示音已温和化, 30 偏小)
-  g_bright = 30;
-  g_autoOffMin = 0;
+  g_volume = 60;   // 用户明确指定(提示音温和化后 30 偏小)
+  g_bright = 30;   // 用户明确指定
+  g_autoOffMin = 1;
   g_autoPowerOff = 1;
   g_powerOffMin = 30;
-  g_refreshSec = 6;
+  g_refreshSec = 5;
   g_jumpSec = 5;
   g_displayMode = DISP_LIST;
   g_newsOn = 1;
   g_newsSec = 8;
   g_newsRefSec = 600;
   g_newsSrc = 0;
+  g_fetchWin = { TW_DEF_AM_S, TW_DEF_AM_E, TW_DEF_PM_S, TW_DEF_PM_E };
+  g_alertWin = { TW_DEF_AM_S, TW_DEF_AM_E, TW_DEF_PM_S, TW_DEF_PM_E };
+  g_workdayOnly = 1;
+  g_fetchOutside = 0;
   g_alertOn = 1;
-  g_alertPct = 4.0f;
+  g_alertPct = 3.0f;
+  memset(g_alertPer, 0, sizeof(g_alertPer));
   g_gyroOn = 1;
+  g_autoSwitchSec = 30;
+  g_autoEffMode = DISP_LIST;
 
   g_nStation = DEF_NSTA;
   for (int i = 0; i < g_nStation; i++) {
@@ -446,11 +498,25 @@ bool utf8Valid(const uint8_t* s, int len) {
   return true;
 }
 
-// 交易时段判断 (周一~周五 9:15-11:30, 12:55-15:05, 北京时间)
-bool isTradingTime() {
+// v7.1: 两套可配置时间范围的统一判断 (闭区间 [起, 止])
+//   g_workdayOnly=1 时周六/周日不生效; 时间未同步(NTP还没拿到)按"在时段内"处理,
+//   保证首次开机或断网时仍能抓到一次行情, 不至于永远空白。
+bool inTimeWindow(const TimeWindow& w) {
   struct tm t;
-  if (!getLocalTime(&t, 50)) return true;  // 拿不到时间按交易处理
-  if (t.tm_wday == 0 || t.tm_wday == 6) return false;
+  if (!getLocalTime(&t, 50)) return true;
+  if (g_workdayOnly && (t.tm_wday == 0 || t.tm_wday == 6)) return false;
   int m = t.tm_hour * 60 + t.tm_min;
-  return (m >= 555 && m <= 690) || (m >= 775 && m <= 905);
+  return (m >= (int)w.amS && m <= (int)w.amE) ||
+         (m >= (int)w.pmS && m <= (int)w.pmE);
+}
+bool isTradingTime() { return inTimeWindow(g_fetchWin); }
+bool isAlertTime()   { return inTimeWindow(g_alertWin); }
+
+// 每只股票的有效阈值: 独立值优先, 0=跟随全局, -1=该股不提醒。
+// 全局与每股互不干扰的关键: 触发去重位按股票单独维护(见主循环 s_alertLastVal[])。
+float alertThresholdFor(int i) {
+  if (i < 0 || i >= MAX_STOCKS) return g_alertPct;
+  float v = g_alertPer[i];
+  if (v < 0) return -1.0f;
+  return (v > 0) ? v : g_alertPct;
 }
