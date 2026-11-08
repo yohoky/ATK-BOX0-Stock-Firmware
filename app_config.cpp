@@ -14,11 +14,23 @@ uint8_t g_powerOffMin = 30;  // 熄屏后 30 分钟无操作自动关机
 uint8_t g_refreshSec = 5;    // 对齐实测盒子
 uint8_t g_jumpSec = 5;
 uint8_t g_displayMode = DISP_LIST;
-// 新闻条默认: 开, 8 秒一条, 10 分钟抓一次, 财经+科技混合
-uint8_t  g_newsOn     = 1;
-uint8_t  g_newsSec    = 8;
-uint16_t g_newsRefSec = 600;
-uint8_t  g_newsSrc    = 0;
+// v7.2 实时快讯默认: 开, 60 秒轮询一次, 显示摘要, 新消息只角标不响铃
+uint8_t  g_newsOn      = 1;
+uint8_t  g_newsSec     = 8;
+uint16_t g_newsRefSec  = 60;
+uint8_t  g_newsSrc     = 0;
+uint8_t  g_newsBeep    = 0;
+uint8_t  g_newsSummary = 1;
+volatile uint8_t g_appMode = APP_STOCK;   // 不落盘, 开机一律回股票模式
+volatile int8_t  g_pendingMode = -1;     // 网页请求由主 loop 消费
+
+// ---- 版本更新说明(设备信息页 / 网页设备页 /api/diag 共用, 每条 1-100 字) ----
+const FwNote FW_HISTORY[] = {
+  { "v7.2", FW_NOTES },
+  { "v7.1", "两套独立时间窗口(信息更新/预警提示)、全局与每股独立提醒阈值、修复自动关机误唤醒、定时自动切换显示、0x0完整固件首发。" },
+  { "v7.0", "8组历史WiFi自动漫游(含无密码)、状态栏六项重做、三键操作重设计与显式返回、网页升级tab与全接口面板、默认音量60。" },
+};
+const int FW_HISTORY_N = (int)(sizeof(FW_HISTORY) / sizeof(FW_HISTORY[0]));
 // ---- v7.1 两套独立时间范围: 默认 9:00-11:30 / 13:00-15:00 ----
 TimeWindow g_fetchWin = { TW_DEF_AM_S, TW_DEF_AM_E, TW_DEF_PM_S, TW_DEF_PM_E };
 TimeWindow g_alertWin = { TW_DEF_AM_S, TW_DEF_AM_E, TW_DEF_PM_S, TW_DEF_PM_E };
@@ -240,8 +252,11 @@ void cfgLoad() {
   // ---- 新闻条 ----
   g_newsOn     = prefs.getUChar("nson", 1);
   g_newsSec    = prefs.getUChar("nssec", 8);
-  g_newsRefSec = prefs.getUShort("nsref", 600);
+  g_newsRefSec = prefs.getUShort("nsref", 60);   // v7.2: 实时快讯 60 秒
   g_newsSrc    = prefs.getUChar("nssrc", 0);
+  g_newsBeep    = prefs.getUChar("nsbeep", 0) ? 1 : 0;
+  g_newsSummary = prefs.getUChar("nssum",  1) ? 1 : 0;
+  g_appMode = APP_STOCK;                        // 开机一律股票模式(不落盘)
   // ---- v7.1: 两套独立时间范围 ----
   if (prefs.getBytes("fwin", &g_fetchWin, sizeof(g_fetchWin)) != sizeof(g_fetchWin))
     g_fetchWin = { TW_DEF_AM_S, TW_DEF_AM_E, TW_DEF_PM_S, TW_DEF_PM_E };
@@ -282,7 +297,10 @@ void cfgLoad() {
     default: g_autoOffMin = 0;
   }
   if (g_autoPowerOff > 1) g_autoPowerOff = 1;
-  if (g_powerOffMin < 1 || g_powerOffMin > 240) g_powerOffMin = 30;
+  // 0 = 用户主动「关闭自动关机」, 必须保留; 旧版这里把 0 钳成 30,
+  // 导致网页里关掉关机后一重启又自动打开(v7.2 修)。
+  if (g_powerOffMin != 0 && (g_powerOffMin < 30 || g_powerOffMin > 240))
+    g_powerOffMin = 30;
   if (g_refreshSec < 3)  g_refreshSec = 6;
   if (g_refreshSec > 120) g_refreshSec = 120;
   if (g_jumpSec < 2)   g_jumpSec = 5;
@@ -290,9 +308,12 @@ void cfgLoad() {
   if (g_newsOn > 1)    g_newsOn = 1;
   if (g_newsSec < 3)   g_newsSec = 8;
   if (g_newsSec > 30)  g_newsSec = 30;
-  if (g_newsRefSec < 60)   g_newsRefSec = 600;   // 1 分钟以内太费流量
+  if (g_newsRefSec < 30)   g_newsRefSec = 60;    // v7.2 允许 30 秒级准实时
   if (g_newsRefSec > 3600) g_newsRefSec = 3600;
-  if (g_newsSrc > NEWS_SRC - 1) g_newsSrc = 0;  if (g_alertOn > 1)   g_alertOn = 1;
+  if (g_newsSrc > NEWS_SRC - 1) g_newsSrc = 0;
+  if (g_newsBeep > 1)    g_newsBeep = 0;
+  if (g_newsSummary > 1) g_newsSummary = 1;
+  if (g_alertOn > 1)   g_alertOn = 1;
   if (g_alertPct < 1.0f || g_alertPct > 20.0f) g_alertPct = 3.0f;
   if (g_workdayOnly > 1) g_workdayOnly = 1;
   if (g_fetchOutside > 1) g_fetchOutside = 1;
@@ -357,6 +378,8 @@ void cfgSaveSettings() {
   prefs.putUChar("nssec", g_newsSec);
   prefs.putUShort("nsref", g_newsRefSec);
   prefs.putUChar("nssrc", g_newsSrc);
+  prefs.putUChar("nsbeep", g_newsBeep);
+  prefs.putUChar("nssum",  g_newsSummary);
   prefs.putUChar("alton", g_alertOn);
   prefs.putFloat("altpct", g_alertPct);
   prefs.putBytes("altper", g_alertPer, sizeof(g_alertPer));
@@ -411,8 +434,11 @@ void cfgFactoryReset() {
   g_displayMode = DISP_LIST;
   g_newsOn = 1;
   g_newsSec = 8;
-  g_newsRefSec = 600;
+  g_newsRefSec = 60;
   g_newsSrc = 0;
+  g_newsBeep = 0;
+  g_newsSummary = 1;
+  g_appMode = APP_STOCK;
   g_fetchWin = { TW_DEF_AM_S, TW_DEF_AM_E, TW_DEF_PM_S, TW_DEF_PM_E };
   g_alertWin = { TW_DEF_AM_S, TW_DEF_AM_E, TW_DEF_PM_S, TW_DEF_PM_E };
   g_workdayOnly = 1;

@@ -9,6 +9,8 @@
  *     左/右 长按+一直按 音量 -/+ (170ms 连发)
  *     M 短按           单只大屏 <-> 列表 切换
  *     M 双击           立即刷新行情
+ *     M 三连(v7.2)     实时快讯(标题+摘要)
+ *     M 四连(v7.2)     收音机模式(菜单第13项也可切)
  *     M 长按           进入设置菜单
  *     左右同按 短按    进入设置菜单(M 键兜底)
  *     左右同按 1.5 秒  关机      M+右 3 秒 = 强制下载模式
@@ -73,6 +75,67 @@ static void stepStock(int dir) {
   uiInvalidate();
 }
 
+// ---------------- v7.2 工作模式: 股票 / 收音机 ----------------
+// 用户确认「提示音和 MP3 不会同时播放」, 因此 I2S_NUM_0 可以分时独占:
+//   进收音机 -> beep 释放通道, radioEnsure() 创建 MP3 解码器接管;
+//   回股票   -> radioRelease() 析构解码器, beep 重建通道(提示音恢复)。
+static void setAppMode(uint8_t m) {
+  if (m == g_appMode) {
+    g_scene = (m == APP_RADIO) ? SCENE_RADIO : SCENE_MAIN;
+    uiInvalidate();
+    return;
+  }
+  radioPause();                       // 先停解码任务, 避免与 I2S 交接并发
+  if (m == APP_RADIO) {
+    radioSetStage(10);
+    // IDLE 任务的 WDT 在 setup() 里已一次性关闭(见下方说明), 这里不再反复摘挂:
+    // 实测「退出收音机时 enableCore*WDT()」会把 IDLE 挂回 TWDT 却恢复不了喂狗,
+    // 约 5 秒后必定触发任务看门狗复位(resetReason=6)。
+    beepReleaseI2S();
+    radioEnsure();
+    if (g_nStation > 0) radioPlay(g_curStation);
+    g_appMode = APP_RADIO;
+    g_scene = SCENE_RADIO;
+    toast("收音机模式 三键可操作", 0x05BF);
+    radioResumeTask();
+  } else {
+    radioRelease();
+    beepResumeI2S();
+    g_appMode = APP_STOCK;
+    g_scene = SCENE_MAIN;
+    // 不要在这里 enable*WDT(): 重新挂载 IDLE 到 TWDT 会立刻触发复位。
+    radioResumeTask();
+    toast("股票行情模式", 0x05BF);
+  }
+  s_menuAt = millis();
+  uiTouch();
+  uiInvalidate();
+}
+
+// 收音机页: 左右切台 / M 播放暂停 / 双击停止 / 双键返回股票模式
+static void handleRadioScene(BtnEvent e) {
+  switch (e) {
+    case BTN_L_SHORT:
+      if (g_nStation > 0) {
+        int nx = (g_curStation - 1 + g_nStation) % g_nStation;
+        radioPlay(nx);
+        toast(stationDisplayName(nx));
+      }
+      break;
+    case BTN_R_SHORT:
+      radioNextStation();
+      toast(stationDisplayName(g_curStation));
+      break;
+    case BTN_L_LONG: radioSetVolume(g_volume - 5); uiShowVolume(); break;
+    case BTN_R_LONG: radioSetVolume(g_volume + 5); uiShowVolume(); break;
+    case BTN_M_SHORT:  radioTogglePlay(); break;
+    case BTN_M_DOUBLE: radioStop(); toast("已停止播放"); break;
+    case BTN_LR_SHORT: setAppMode(APP_STOCK); break;
+    default: break;
+  }
+  uiInvalidate();
+}
+
 // ---------------- 主界面按键 ----------------
 static void handleMain(BtnEvent e) {
   switch (e) {
@@ -97,6 +160,18 @@ static void handleMain(BtnEvent e) {
     case BTN_M_DOUBLE:                     // 双击: 立即刷新行情
       stockRequestRefresh();
       toast("刷新行情", 0x05BF);
+      break;
+    case BTN_M_TRIPLE:                     // v7.2: 三连 M -> 实时快讯
+      g_scene = SCENE_NEWS;
+      g_newsSel = 0;
+      g_newsDetail = 0;
+      s_menuAt = millis();
+      if (!newsReady()) newsKick();
+      newsTakeNew();                       // 进页面即视为已读, 清状态栏红点
+      uiInvalidate();
+      break;
+    case BTN_M_QUAD:                       // v7.2: 四连 M -> 收音机
+      setAppMode(APP_RADIO);
       break;
     // v7.0: 恢复上一版习惯 —— M 短按只在"单只/列表"之间切换
     case BTN_M_SHORT:
@@ -136,6 +211,16 @@ static void menuEnter() {
   } else if (sel == MENU_BEEP) {
     beepTest();
     toast("提示音测试", 0x05BF);
+  } else if (sel == MENU_MODE) {            // v7.2: 菜单里切股票/收音机
+    setAppMode(g_appMode == APP_STOCK ? APP_RADIO : APP_STOCK);
+  } else if (sel == MENU_NEWS) {            // v7.2: 三连 M 的兜底入口
+    g_scene = SCENE_NEWS;
+    g_newsSel = 0;
+    g_newsDetail = 0;
+    s_menuAt = millis();
+    if (!newsReady()) newsKick();
+    newsTakeNew();
+    uiInvalidate();
   } else if (sel == MENU_BRIGHT || sel == MENU_VOL || sel == MENU_JUMP ||
              sel == MENU_REFRESH || sel == MENU_APOW ||
              sel == MENU_ALERT || sel == MENU_OFF) {
@@ -198,11 +283,14 @@ static void handleNewsScene(BtnEvent e) {
       g_newsSel = (g_newsSel + 1) % n;
       uiInvalidate();
       break;
-    case BTN_M_SHORT:
-    case BTN_LR_SHORT:
+    case BTN_M_SHORT:                     // v7.2: 展开/收起全文摘要
+      g_newsDetail = !g_newsDetail;
+      uiInvalidate();
+      break;
+    case BTN_LR_SHORT:                    // 显式返回(回到当前模式的主页)
       newsSelect(g_newsSel);
-      uiFlashRadioLine();
-      g_scene = SCENE_MAIN;
+      newsTakeNew();
+      g_scene = (g_appMode == APP_RADIO) ? SCENE_RADIO : SCENE_MAIN;
       uiInvalidate();
       break;
     case BTN_M_DOUBLE:
@@ -364,6 +452,24 @@ static void handleConfirm(BtnEvent e) {
   }
 }
 
+// v7.2: MP3 解码循环放在独立任务。
+//   ESP32-audioI2S 的 audio.loop() 在建立流/解码时会同步阻塞数秒, 放在
+//   Arduino loopTask 里会触发任务看门狗(实测 resetReason=6 直接复位)。
+//   独立任务不注册 TWDT, 主 loop 保持响应 -> 播放时按键/网页仍能退出模式。
+static void radioDecodeTask(void* arg) {
+  (void)arg;
+  for (;;) {
+    if (radioTaskCanRun()) {
+      radioTaskBegin();
+      radioLoopHandler();
+      radioTaskEnd();
+      vTaskDelay(pdMS_TO_TICKS(2));   // 留出 CPU 给 IDLE/UI, 库要求尽量高频即可
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+  }
+}
+
 void setup() {
   // ★ 最先做: 系统电源保持脚拉高, 否则松手/延时后整机断电
   pinMode(PIN_SYS_POW, OUTPUT);
@@ -376,6 +482,14 @@ void setup() {
   delay(80);
   Serial.printf("\n[SYS] BOOT %s  psram=%uMB heap=%u\n", FW_VERSION,
                 (unsigned)(ESP.getPsramSize() >> 20), (unsigned)ESP.getFreeHeap());
+
+  // v7.2 稳定性修复: ESP32-audioI2S 的 audio.loop() 在建立流/解码时会同步阻塞,
+  // 其自带的优先级 2 PeriodicTask 也可能把某个核的 IDLE 任务饿死, 触发 TWDT 复位。
+  // 因此开机一次性把两个核的 IDLE 移出任务看门狗, 全程不再 enable*WDT()。
+  // 反复「摘除→挂回」会让 IDLE 重新入表却没人喂狗, 约 5s 后必定复位(实测)。
+  // loopTask 的 WDT 保持原状(Arduino 3.3 默认为关), 主循环仍由 decodeTask 解耦保护。
+  disableCore0WDT();
+  disableCore1WDT();
 
   pinMode(PIN_CODEC_PWR, OUTPUT);
   digitalWrite(PIN_CODEC_PWR, HIGH);
@@ -403,17 +517,22 @@ void setup() {
                 (unsigned)ESP.getFreeHeap());
 #endif
 
-  gyroInit();                              // QMI8658 重力感应(横竖屏切换)
+  // v7.2: 开机预热 beep 的 I2S 通道(MCLK 常供 ES8311), 股票模式提示音不丢首声。
+  // 进收音机模式时 setAppMode() 会先 beepReleaseI2S() 把通道让给 MP3 解码器。
+  beepResumeI2S();
 
-  newsInit();                              // 新闻缓存(不联网; 连上 WiFi 后任务自己抓)
+  gyroInit();                              // 板上实测无 IMU, 保留未来外接兼容
+
+  newsInit();                              // 快讯缓存(不联网; 连上 WiFi 后任务自己抓)
 
   wifiInit();                              // 常开热点 + 后台连路由器, 非阻塞
 
   xTaskCreatePinnedToCore(uiTask, "ui", 8192, nullptr, 1, nullptr, 0);
   stockTaskStart();
-  // 新闻功能已停用(2026-11-06): 新浪滚动新闻接口在 ESP32 上解析不稳定,
-  // 反复踩 filter/内存坑仍拿不到 data 数组, 已按用户要求去掉, 屏幕不再显示新闻条。
-  // xTaskCreatePinnedToCore(newsTask, "news", 8192, nullptr, 1, nullptr, 0);
+  // v7.2 实时快讯: 改用东方财富 7x24(HTTP 明文 6KB, 手写扫描解析),
+  // 不再用旧版新浪滚动接口(40+字段/16KB/ArduinoJson filter 在 ESP32 上反复解析出 0 条)。
+  xTaskCreatePinnedToCore(newsTask, "news", 6144, nullptr, 1, nullptr, 0);
+  xTaskCreatePinnedToCore(radioDecodeTask, "radio", 8192, nullptr, 1, nullptr, 1);
   webBegin();
 
   uiInvalidate();
@@ -422,6 +541,14 @@ void setup() {
 }
 
 void loop() {
+  // v7.2: 网页(async_tcp 任务)只置标志, 模式切换(含 I2S 交接/Audio 创建)
+  // 一律在主 loop 执行, 避免在异步网络任务里操作 I2S 与动态分配大对象。
+  if (g_pendingMode >= 0) {
+    uint8_t m = (uint8_t)g_pendingMode;
+    g_pendingMode = -1;
+    setAppMode(m);
+  }
+
   BtnEvent e = btnPoll();
 
   // 任何操作都要重置"自动熄屏"计时, 否则正看着也会突然黑屏
@@ -462,6 +589,12 @@ void loop() {
     return;
   }
 
+  // v7.2: 收音机模式的子页面按 M 长按 = 直接退回股票模式(同时释放 I2S)
+  if (g_appMode == APP_RADIO && g_scene != SCENE_MAIN && e == BTN_M_LONG) {
+    setAppMode(APP_STOCK);
+    e = BTN_NONE;
+  }
+
   // ★ 显式返回: 任何子页面按 M 长按 = 立刻回主界面, 不用等 8 秒超时
   if (g_scene != SCENE_MAIN && e == BTN_M_LONG) {
     g_scene = SCENE_MAIN;
@@ -474,6 +607,7 @@ void loop() {
       case SCENE_ADJ:     handleAdj(e);  break;
       case SCENE_CONFIRM: handleConfirm(e); break;
       case SCENE_NEWS:    handleNewsScene(e); break;
+      case SCENE_RADIO:   handleRadioScene(e); break;
       case SCENE_INFO:
         if (e != BTN_NONE) { g_scene = SCENE_MENU; uiInvalidate(); }
         break;
@@ -598,7 +732,9 @@ void loop() {
   //      改为以「最后一次用户操作」为兜底基准, 熄屏只是省电步骤。
   //   ② powerOff() 的 ext1 唤醒掩码含常态为 LOW 的 M 键(GPIO4 高电平有效),
   //      ANY_LOW 会立刻唤醒深睡 -> 看起来像"没关机"(已在 wifi_mgr.cpp 修掉)。
-  if (g_powerOffMin > 0 && g_autoPowerOff && g_scene == SCENE_MAIN) {
+  // v7.2: 听广播时不自动关机(否则正在播放会被切断)
+  if (g_powerOffMin > 0 && g_autoPowerOff && g_appMode == APP_STOCK &&
+      g_scene == SCENE_MAIN) {
     uint32_t base = uiScreenOffAt() ? uiScreenOffAt() : uiLastTouchAt();
     if (base && millis() - base > (uint32_t)g_powerOffMin * 60000UL) {
       Serial.println("[SYS] 无操作超时, 自动关机");
@@ -614,17 +750,22 @@ void loop() {
     if (s_wifiOk) toast("网络已连接", 0x07E0);
     else          toast("网络已断开", 0xFD20);
   }
-#if ENABLE_RADIO
-  static bool s_autoplayDone = false;
-  if (s_wifiOk && !s_autoplayDone) {
-    s_autoplayDone = true;
-    if (g_nStation > 0) radioPlay(g_curStation);
-  }
-#endif
+  // v7.2: 开机不自动开播(一律股票模式); MP3 解码循环在 radioDecodeTask 里跑,
+  // 主 loop 只负责按键/UI/网络, 不会被 audio.loop() 阻塞触发任务看门狗。
 
-#if ENABLE_RADIO
-  radioLoopHandler();
-#endif
+  // v7.2 新快讯: 状态栏红点常驻到用户进新闻页; 首次到达给一次 toast。
+  // 默认不响铃(深夜不吵), 网页可开「新消息提示音」且仍受预警时段约束。
+  static uint8_t s_newsNotified = 0;
+  if (g_newsNew == 0) s_newsNotified = 0;
+  else if (g_newsNew > s_newsNotified) {
+    s_newsNotified = g_newsNew;
+    char m[32];
+    snprintf(m, sizeof(m), "快讯 +%u 条 三连M查看", (unsigned)g_newsNew);
+    toast(m, 0x05BF);
+    if (g_newsBeep && isAlertTime() && g_appMode == APP_STOCK) beepAlert();
+    uiInvalidate();
+  }
+
   webLoopHandler();
   cfgFlushVolume();          // 音量稳定后落盘
   beepLoop();                // 提醒音播完自动关断

@@ -112,7 +112,8 @@ volatile UiScene g_scene = SCENE_MAIN;
 volatile int     g_menuSel = 0;
 volatile uint8_t g_menuListN = MENU_N;
 volatile int     g_stationSel = 0;
-volatile int     g_newsSel = 0;   // 新闻子页光标
+volatile int     g_newsSel = 0;    // 新闻子页光标
+volatile uint8_t g_newsDetail = 0; // v7.2: 1=展开全文摘要
 
 // 菜单: 一次最多显示几项(超过则滚动)
 #define MENU_ROWS  6
@@ -127,7 +128,8 @@ static volatile uint32_t s_toastUntil = 0;
 // ---------------- 菜单项 ----------------
 static const char* MENU_NAME[MENU_N] = {
   "显示模式", "轮播间隔", "刷新间隔", "涨跌提醒", "自动关机", "亮度",
-  "音量", "自动熄屏", "测试提示音", "设备信息", "恢复出厂", "关机"
+  "音量", "自动熄屏", "测试提示音", "设备信息", "恢复出厂", "关机",
+  "工作模式", "实时新闻"
 };
 
 // GB2312 字库里有"涨"没有"跌"? 有的(GB2312 一级字库). 
@@ -170,6 +172,8 @@ static const char* menuValue(int i, char* buf, int n) {
       if (g_autoOffMin) snprintf(buf, n, "%d 分", g_autoOffMin);
       else              snprintf(buf, n, "常亮");
       return buf;
+    case MENU_MODE:  return g_appMode == APP_RADIO ? "收音机" : "股票";
+    case MENU_NEWS:  snprintf(buf, n, "%u条", (unsigned)g_nNews); return buf;
     default: buf[0] = 0; return buf;
   }
 }
@@ -549,6 +553,9 @@ static void drawStatusBar() {
     drawCN(disp(), vx + 9, 1, vb, vc);
   }
 
+  // v7.2 新快讯角标: 页码与喇叭之间的空档画一个小红点
+  if (g_newsOn && g_newsNew > 0) disp().fillRect(116, 4, 5, 10, C_UP);
+
   // 5 电量: 百分比数字画在电池图标内部; 60-100 绿色, 20-59 橙, <20 红
   {
     static uint32_t s_batAt = 0;
@@ -608,6 +615,23 @@ static int utf8Take(char* out, int outSz, const char* src, int maxW) {
   }
   out[o] = 0;
   return (int)((const char*)p - src);
+}
+
+// v7.2: 中文自动换行(按 utf8 字符边界, 不会把汉字切成两半)。
+// 返回实际画了几行; 摘要/版本更新说明都用它。
+static int drawCNWrap(int x, int y, const char* s, int maxW,
+                      int lineH, int maxLines, uint16_t color) {
+  char line[128];
+  const char* p = s;
+  int lines = 0;
+  while (p && *p && lines < maxLines) {
+    int used = utf8Take(line, sizeof(line), p, maxW);
+    if (used <= 0) break;
+    drawCN(disp(), x, y + lines * lineH, line, color);
+    p += used;
+    lines++;
+  }
+  return lines;
 }
 
 static void drawBottomBar() {
@@ -753,113 +777,150 @@ static void drawConfirm() {
   drawCN(disp(), 20, 196, "左/右键取消", C_FLAT);
 }
 
-// ---------------- 新闻子页 ----------------
+// ---------------- v7.2 实时快讯子页(标题 + 摘要) ----------------
 static void drawNewsScene() {
   disp().fillRect(0, 0, 240, 240, C_BG);
-  drawTitle("新闻要闻", "中键返回");
+  char rt[16];
+  if (g_newsNew > 0) snprintf(rt, sizeof(rt), "NEW %u", (unsigned)g_newsNew);
+  else               snprintf(rt, sizeof(rt), "M展开");
+  drawTitle("实时快讯", rt);
 
   if (g_nNews == 0) {
-    drawCN(disp(), 12, 70, "还没有新闻", C_FLAT);
-    drawCN(disp(), 12, 92, "等联网后自动抓取", C_FLAT);
-    drawCN(disp(), 12, 130, "网页可设 财经/科技", C_FLAT);
+    drawCN(disp(), 12, 60, "正在抓取财经快讯…", C_FLAT);
+    drawCN(disp(), 12, 86, "联网后每 60 秒自动更新", C_FLAT);
+    drawCN(disp(), 12, 112, "来源 东方财富 7x24", C_FLAT);
+    drawCN(disp(), 12, 150, "双击 M 立即刷新", C_ACCENT);
+    drawCN(disp(), 12, 190, "左右同按返回", C_FLAT);
     return;
   }
   if (g_newsSel >= g_nNews) g_newsSel = g_nNews - 1;
   if (g_newsSel < 0) g_newsSel = 0;
+  int sel = g_newsSel;
 
-  const int ROWS = 7, RH = 24, Y0 = 26;
+  if (g_newsDetail) {                       // 全文摘要视图
+    int ln = drawCNWrap(6, 28, g_news[sel].title, 228, 18, 3, C_ACCENT);
+    int y = 28 + ln * 18 + 4;
+    const char* t = g_news[sel].time;
+    char tm[12];
+    if (strlen(t) >= 16) { strncpy(tm, t + 11, 5); tm[5] = 0; }
+    else strcpy(tm, "最新");
+    drawCN(disp(), 6, y, tm, C_FLAT); y += 18;
+    const char* sum = g_news[sel].summary[0] ? g_news[sel].summary : "（本条无摘要，仅标题）";
+    int left = (236 - y) / 18;
+    if (left > 10) left = 10;
+    drawCNWrap(6, y, sum, 228, 18, left, C_FG);
+    drawCN(disp(), 6, 222, "M收起  左右换条  双键返回", C_FLAT);
+    return;
+  }
+
+  const int ROWS = 5, RH = 23, Y0 = 26;    // 列表 + 下方摘要预览
   int top = 0;
-  if (g_newsSel >= ROWS) top = g_newsSel - ROWS + 1;
-  if (g_newsSel < top) top = g_newsSel;
+  if (sel >= ROWS) top = sel - ROWS + 1;
   if (top > g_nNews - ROWS) top = g_nNews - ROWS;
   if (top < 0) top = 0;
-
   for (int k = 0; k < ROWS; k++) {
     int i = top + k;
     if (i >= g_nNews) break;
     int y = Y0 + k * RH;
-    bool sel = (i == g_newsSel);
-    uint16_t bgc = sel ? C_SEL : C_BG;
-    if (sel) disp().fillRect(0, y - 3, 240, RH, C_SEL);
-
-    bool fin = (g_news[i].src == 0);
-    drawCN(disp(), 4, y + 3, fin ? "财" : "科",
-           fin ? C_WARN : C_ACCENT, bgc, true);
-
+    bool on = (i == sel);
+    if (on) disp().fillRect(0, y - 2, 240, RH, C_SEL);
     char t[96];
-    cnEllipsis(t, sizeof(t), g_news[i].title, 206);
-    drawCN(disp(), 24, y + 3, t, sel ? C_BG : C_FG, bgc, true);
+    cnEllipsis(t, sizeof(t), g_news[i].title, 224);
+    drawCN(disp(), 4, y + 3, t, on ? C_BG : C_FG, on ? C_SEL : C_BG, true);
+  }
+  disp().fillRect(0, 142, 240, 2, C_LINE);
+  const char* sum = g_news[sel].summary[0] ? g_news[sel].summary : g_news[sel].title;
+  drawCNWrap(6, 150, sum, 228, 17, 4, C_FLAT);
+  char b[32];
+  snprintf(b, sizeof(b), "%d/%d", sel + 1, (int)g_nNews);
+  drawCN(disp(), 4, 222, b, C_DIM, C_BG, true);
+  drawCN(disp(), 60, 222, "M展开全文  双击刷新", C_FLAT);
+}
+
+// ---------------- v7.2 收音机全屏页 ----------------
+static void drawRadioScene() {
+  disp().fillRect(0, 0, 240, 240, C_BG);
+  drawTitle("网络收音机", "四连M进入");
+
+  const char* nm = stationDisplayName(g_curStation);
+  char big[STA_NAME_LEN + 16];
+  snprintf(big, sizeof(big), "%d. %s", (int)g_curStation + 1,
+           nm[0] ? nm : "未配置电台");
+  drawCN(disp(), 8, 32, big, C_ACCENT);
+
+  const char* st; uint16_t sc;
+  switch (g_radioState) {
+    case RADIO_PLAYING:    st = "正在播放";       sc = C_DOWN;   break;
+    case RADIO_CONNECTING: st = "连接中…";        sc = C_WARN;   break;
+    case RADIO_PAUSED:     st = "已暂停";         sc = C_ACCENT; break;
+    case RADIO_ERROR:      st = "连接失败 自动重试"; sc = C_UP;  break;
+    default:               st = "已停止";         sc = C_FLAT;   break;
+  }
+  drawCN(disp(), 8, 58, st, sc);
+
+  char b[64];
+  snprintf(b, sizeof(b), "码率 %u kbps  播放 %lus",
+           (unsigned)(g_radioBitrate / 1000), (unsigned long)g_radioSec);
+  drawCN(disp(), 8, 80, b, C_FLAT);
+  if (g_streamTitle[0]) {
+    char s[96]; cnEllipsis(s, sizeof(s), g_streamTitle, 224);
+    drawCN(disp(), 8, 102, s, C_FG);
+  } else {
+    drawCN(disp(), 8, 102, "（电台未提供曲名）", C_DIM);
   }
 
-  drawCN(disp(), 4, 206, "左右翻页  中键=定位到这条", C_FLAT);
-  char b[24];
-  snprintf(b, sizeof(b), "%d/%d", g_newsSel + 1, (int)g_nNews);
-  drawCN(disp(), 4, 224, b, C_DIM, C_BG, true);
+  disp().fillRect(8, 128, 224, 12, 0x2120);
+  disp().fillRect(8, 128, 224 * g_volume / 100, 12, C_ACCENT);
+  char vb[24]; snprintf(vb, sizeof(vb), "音量 %d", g_volume);
+  drawCN(disp(), 8, 146, vb, C_FG);
+
+  drawCN(disp(), 8, 174, "左右短按 切台", C_FLAT);
+  drawCN(disp(), 8, 194, "M播放/暂停  双击停止", C_FLAT);
+  drawCN(disp(), 8, 216, "双键返回  M长按回股票", C_FLAT);
 }
 
 static void drawInfo() {
   disp().fillRect(0, 0, 240, 240, C_BG);
   drawTitle("设备信息", "任意键返回");
 
-  char b[72];
+  char b[80];
   int y = 26;
-  drawCN(disp(), 6, y, "固件 " FW_VERSION, C_ACCENT); y += 18;
+  snprintf(b, sizeof(b), "固件 %s  %s", FW_VERSION,
+           g_appMode == APP_RADIO ? "收音机" : "股票");
+  drawCN(disp(), 6, y, b, C_ACCENT); y += 18;
+
+  // ★ v7.2: 每个版本写一段 1-100 字的更新说明, 中文自动换行显示
+  drawCNWrap(6, y, FW_NOTES, 228, 15, 4, C_FG);
+  y += 62;
 
   snprintf(b, sizeof(b), "网络 %s", wifiStateText());
   drawCN(disp(), 6, y, b, g_wifiState == WIFI_CONNECTED ? C_FG : C_WARN); y += 18;
-
-  if (g_wifiState == WIFI_CONNECTED) {
+  if (g_wifiState == WIFI_CONNECTED)
     snprintf(b, sizeof(b), "IP %s  %ddBm", g_wifiIp, WiFi.RSSI());
-    drawCN(disp(), 6, y, b, C_FG); y += 18;
-  } else if (strlen(g_wifiSsid)) {
-    char raw[64], cut[64];
-    snprintf(raw, sizeof(raw), "目标 %s", g_wifiSsid);
-    cnEllipsis(cut, sizeof(cut), raw, 228);
-    drawCN(disp(), 6, y, cut, C_FLAT); y += 18;
-  }
-
-#if ENABLE_RADIO
-  snprintf(b, sizeof(b), "音频 %s%s", g_codecOk ? "ES8311" : "未应答",
-           g_codecOk ? (g_radioHasAudio ? " 有数据" : " 无数据") : "(无声)");
-  drawCN(disp(), 6, y, b, g_codecOk ? C_FLAT : C_WARN); y += 18;
-
-  snprintf(b, sizeof(b), "码率 %u kbps 播%us",
-           (unsigned)(g_radioBitrate / 1000), (unsigned)g_radioSec);
+  else
+    snprintf(b, sizeof(b), "目标 %s", g_wifiSsid[0] ? g_wifiSsid : "未配置");
   drawCN(disp(), 6, y, b, C_FLAT); y += 18;
-#else
-  int perN = 0;
-  for (int i = 0; i < g_nStock; i++) if (g_alertPer[i] != 0) perN++;
-  snprintf(b, sizeof(b), "提醒%s %.1f%% 独立%d只",
-           g_alertOn ? "开" : "关", g_alertPct, perN);
-  drawCN(disp(), 6, y, b, C_FLAT); y += 18;
-  // v7.1: 信息页直接显示两套时间范围, 便于不连网页也能核对
-  snprintf(b, sizeof(b), "更新%u:%02u-%u:%02u/%u-%u",
-           g_fetchWin.amS / 60, g_fetchWin.amS % 60,
-           g_fetchWin.amE / 60, g_fetchWin.amE % 60,
-           g_fetchWin.pmS / 60, g_fetchWin.pmE / 60);
-  drawCN(disp(), 6, y, b, C_FG); y += 18;
-  snprintf(b, sizeof(b), "预警%u:%02u-%u:%02u/%u-%u",
-           g_alertWin.amS / 60, g_alertWin.amS % 60,
-           g_alertWin.amE / 60, g_alertWin.amE % 60,
-           g_alertWin.pmS / 60, g_alertWin.pmE / 60);
-  drawCN(disp(), 6, y, b, C_FG); y += 18;
-#endif
 
   snprintf(b, sizeof(b), "音量%d 亮度%d %s", g_volume, g_bright,
            g_displayMode == DISP_LIST ? "列表" : "单只");
   drawCN(disp(), 6, y, b, C_FLAT); y += 18;
 
-  snprintf(b, sizeof(b), "内存%uK PSRAM%uM 屏%s",
-           (unsigned)(ESP.getFreeHeap() >> 10), (unsigned)(ESP.getPsramSize() >> 20),
-           s_sprOk ? "缓存" : "直画");
-  drawCN(disp(), 6, y, b, C_FLAT); y += 18;
-
   uint32_t up = millis() / 1000;
-  snprintf(b, sizeof(b), "运行 %luh%02lum  股票%u", up / 3600, (up / 60) % 60,
-           (unsigned)g_nStock);
+  snprintf(b, sizeof(b), "内存%uK PSRAM%uM 运行%lum",
+           (unsigned)(ESP.getFreeHeap() >> 10), (unsigned)(ESP.getPsramSize() >> 20),
+           (unsigned long)(up / 60));
   drawCN(disp(), 6, y, b, C_FLAT); y += 18;
 
-  drawCN(disp(), 6, 214, "左右同按=中键  长按=关机", C_FLAT);
+  uint32_t ago = newsUpdatedAt() ? (millis() - newsUpdatedAt()) / 1000 : 0;
+  snprintf(b, sizeof(b), "快讯%u条 %lus前 电台%d",
+           (unsigned)g_nNews, (unsigned long)ago, (int)g_radioState);
+  drawCN(disp(), 6, y, b, C_FLAT); y += 18;
+
+  snprintf(b, sizeof(b), "提醒%s %.1f%% 关机%s",
+           g_alertOn ? "开" : "关", g_alertPct, poffName(g_powerOffMin));
+  drawCN(disp(), 6, y, b, C_FLAT); y += 18;
+
+  drawCN(disp(), 6, 220, "左右同按=中键  长按=关机", C_FLAT);
 }
 
 // ---------------- toast ----------------
@@ -929,6 +990,8 @@ static void drawAll() {
     drawConfirm();
   } else if (sc == SCENE_NEWS) {
     drawNewsScene();
+  } else if (sc == SCENE_RADIO) {
+    drawRadioScene();
   } else {
     drawStatusBar();
     // 只有"没连上路由器且一条行情都没有"才铺满配网向导;

@@ -1,170 +1,164 @@
 #include "news_feed.h"
 #include <WiFi.h>
+#include <WiFiClient.h>
 #include <HTTPClient.h>
-#include <ArduinoJson.h>
 
 // ---------------- 数据 ----------------
 NewsItem         g_news[MAX_NEWS];
 volatile uint8_t g_nNews   = 0;
 volatile int8_t  g_curNews = 0;
-volatile NewsDiag g_newsDiag = {0, 0, 0, 0, 0, 0, 0};
+volatile uint8_t g_newsNew = 0;
+volatile NewsDiag g_newsDiag = {0, 0, 0, 0, 0, 0};
 
-static SemaphoreHandle_t s_mux       = nullptr;
-static volatile bool     s_kick      = false;
-static volatile bool     s_fetching  = false;
+static SemaphoreHandle_t s_mux = nullptr;
+static volatile bool     s_kick     = false;
+static volatile bool     s_fetching = false;
 static uint32_t          s_lastFetch = 0;
-static uint32_t          s_retryAt   = 0;   // 抓取失败后的重试时刻(不用减法, 免回绕)
-static uint16_t          s_okCount   = 0;
+static uint32_t          s_retryAt   = 0;
+static char              s_lastCode[NEWS_CODE] = "";  // 上次最新一条, 用于增量判定
 
-#define SRC_FIN   0
-#define SRC_TECH  1
+// HTTP 明文: ESP32-S3 上省掉 TLS 握手与 WiFiClientSecure 的 ~40KB 堆,
+// 让新闻任务与 MP3 解码可以并存。实测 2026-11 返回 200 / 6~12KB / UTF-8 中文不转义。
+static const char* NEWS_URL =
+  "http://np-listapi.eastmoney.com/comm/web/getFastNewsList?client=web&biz=web_724&fastColumn=102&sortEnd=&pageSize=20&req_trace=1";
+static const char* NEWS_REF = "https://kuaixun.eastmoney.com/";
 
-// 新浪滚动新闻统一接口(pageid=153), 财经 2516 / 科技 2515
-static const char* URL_FIN   = "http://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2516&num=8&page=1";
-static const char* URL_TECH  = "http://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2515&num=8&page=1";
-static const char* REF_FIN   = "https://finance.sina.com.cn";
-static const char* REF_TECH  = "https://tech.sina.com.cn";
-
-// 标题清理: 去首尾空白、换行/制表符压成空格、按 utf8 边界截断
-//   顺手把最常见的几个 HTML 实体还原, 否则屏幕上会显示 "&quot;" 这种噪音
-static void cleanTitle(char* out, int outSz, const char* in) {
-  int o = 0;
-  const uint8_t* p = (const uint8_t*)in;
-  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
-  while (*p && o < outSz - 4) {
-    uint8_t c = *p;
-    if (c == '&') {                       // 实体替换
-      const char* rep = nullptr;
-      int skip = 0;
-      if      (!strncmp((const char*)p, "&quot;", 6)) { rep = "\""; skip = 6; }
-      else if (!strncmp((const char*)p, "&#39;", 5))  { rep = "'"; skip = 5; }
-      else if (!strncmp((const char*)p, "&apos;", 6)) { rep = "'"; skip = 6; }
-      else if (!strncmp((const char*)p, "&amp;", 5))  { rep = "&"; skip = 5; }
-      else if (!strncmp((const char*)p, "&lt;", 4))   { rep = "<"; skip = 4; }
-      else if (!strncmp((const char*)p, "&gt;", 4))   { rep = ">"; skip = 4; }
-      else if (!strncmp((const char*)p, "&nbsp;", 6)) { rep = " "; skip = 6; }
-      if (rep) { out[o++] = rep[0]; p += skip; continue; }
+// 在 [from,end) 内找 JSON key, 返回 key 之后第一个非空白字符(通常是 '"')。
+// 不用 strstr: 它会越过 end 找到下一条记录里去。
+static const char* findKey(const char* from, const char* end, const char* key) {
+  size_t kl = strlen(key);
+  if (!kl) return nullptr;
+  for (const char* p = from; p + kl <= end; ++p) {
+    if (*p == key[0] && memcmp(p, key, kl) == 0) {
+      const char* v = p + kl;
+      while (v < end && (*v == ' ' || *v == '\t')) ++v;
+      return v;
     }
-    int n = (c < 0x80) ? 1 : ((c & 0xE0) == 0xC0 ? 2 : ((c & 0xF0) == 0xE0 ? 3 : 4));
-    if (c == '\r' || c == '\n' || c == '\t') { out[o++] = ' '; p++; continue; }
-    if ((c & 0xC0) == 0x80) { p++; continue; }        // 游离续字节, 丢掉
-    for (int k = 0; k < n && p[k]; k++) out[o++] = (char)p[k];
-    p += n;
   }
-  // 去掉尾部空格
-  while (o > 0 && out[o - 1] == ' ') o--;
-  out[o] = 0;
+  return nullptr;
 }
 
-// 抓一个源, 解析 title 列表写入 dst, 返回条数
-static int fetchInto(NewsItem* dst, int maxN, const char* url,
-                     const char* ref, uint8_t src) {
-  WiFiClient client;
-  HTTPClient http;
-  http.setConnectTimeout(5000);
-  http.setTimeout(9000);
-  if (!http.begin(client, url)) {
-    Serial.printf("[News] begin fail: %s\n", url);
-    return 0;
+// 拷出 JSON 字符串值: 处理 \" \\ \/ \n \uXXXX, 按 UTF-8 字符边界截断,
+// 保证不会出现半个汉字(旧版底部新闻条显示"锟斤拷"就是这个原因)。
+static void copyVal(char* out, int outSz, const char* src, const char* end) {
+  const uint8_t* p = (const uint8_t*)src;
+  const uint8_t* e = (const uint8_t*)end;
+  int o = 0;
+  if (!src || src >= end) { out[0] = 0; return; }
+  if (p < e && *p == '"') ++p;
+  while (p < e && o < outSz - 1) {
+    if (*p == '"') break;                       // 未转义的结束引号
+    if (*p == '\\' && p + 1 < e) {
+      uint8_t c = p[1];
+      if (c == '"' || c == '\\' || c == '/') { out[o++] = (char)c; p += 2; continue; }
+      if (c == 'n' || c == 'r' || c == 't')  { out[o++] = ' ';     p += 2; continue; }
+      if (c == 'u' && p + 5 < e)             { out[o++] = '?';     p += 6; continue; }
+      p += 2; continue;
+    }
+    uint8_t c = *p;
+    int n = (c < 0x80) ? 1 : ((c & 0xE0) == 0xC0 ? 2 : ((c & 0xF0) == 0xE0 ? 3 : 4));
+    if (p + n > e || o + n > outSz - 1) break;
+    for (int k = 0; k < n; k++) out[o++] = (char)p[k];
+    p += n;
   }
-  http.addHeader("Referer", ref);
-  http.addHeader("User-Agent", "Mozilla/5.0 (ESP32)");
-  int code = http.GET();
-  if (src == SRC_FIN) g_newsDiag.finHttp = code;
-  else                 g_newsDiag.techHttp = code;
-  if (code != 200) {
-    Serial.printf("[News] HTTP %d (src=%d)\n", code, src);
-    http.end();
-    return 0;
-  }
-  int len = http.getSize();
-  Serial.printf("[News] GET 200 len=%d (src=%d)\n", len, src);
+  out[o] = 0;
+  // 尾部空白压掉
+  while (o > 0 && out[o - 1] == ' ') out[--o] = 0;
+}
 
-  // 用 filter 只保留 data[].title, 其余几十字段全丢弃, 省内存。
-  //   ★ ArduinoJson 7 的 filter 数组必须用 .add() 显式创建, 不能用 [0]:
-  //     filter["result"]["data"][0]["title"] 会让 "data" 被当成对象, 与真实数组类型
-  //     不匹配 -> 整个 data 被排除 -> 解析出 0 条(ArduinoJson issue #2207 同款坑)。
-  //   正确写法:
-  //     JsonObject f = filter["result"]["data"].add();  // .add() 把 data 变数组并加模板元素
-  //     f["title"] = true;
-  JsonDocument filter;
-  JsonObject fdata = filter["result"]["data"].add();
-  fdata["title"] = true;
-
-  JsonDocument doc;
-  DeserializationError err =
-      deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
-  http.end();
-  if (err) {
-    if (src == SRC_FIN) g_newsDiag.finJsonErr = (int)err.code();
-    else                 g_newsDiag.techJsonErr = (int)err.code();
-    Serial.printf("[News] JSON %s (src=%d)\n", err.c_str(), src);
-    return 0;
-  }
-
+// 以 "summary": 作为每条记录的锚点(东财固定字段顺序 summary->code->...->title),
+// 两条 summary 之间即一条完整记录; 不建 JSON 树, 内存恒定。
+static int parseFastNews(const String& body, NewsItem* out, int maxN) {
+  const char* s   = body.c_str();
+  const char* end = s + body.length();
+  const char* p   = findKey(s, end, "\"fastNewsList\":");
+  if (!p) return 0;
   int n = 0;
-  // ★ 先把数组取出来再遍历: 直接写 for (JsonObject it : doc["result"]["data"].as<JsonArray>())
-  //   拿到的是临时 JsonVariant 的引用, range-for 期间可能已析构(-Wdangling-reference)。
-  JsonArray arr = doc["result"]["data"].as<JsonArray>();
-  Serial.printf("[News] data 数组 %d 条 (src=%d)\n", (int)arr.size(), src);
-  for (JsonObject it : arr) {
-    if (n >= maxN) break;
-    const char* t = it["title"] | "";
-    if (!t || !t[0]) continue;
-    cleanTitle(dst[n].title, sizeof(dst[n].title), t);
-    if (!dst[n].title[0]) continue;
-    dst[n].src = src;
-    n++;
+  while (n < maxN) {
+    const char* rec = findKey(p, end, "\"summary\":");
+    if (!rec) break;
+    const char* next = findKey(rec + 10, end, "\"summary\":");
+    const char* recEnd = next ? next : end;
+    // rec 本身已经是 "summary": 之后的值起点, 不能再从 rec 往后找同名 key
+    // (key 在 rec 之前), 否则 sv 恒为 null -> 摘要永远为空。
+    const char* sv = rec;
+    const char* cv = findKey(rec, recEnd, "\"code\":");
+    const char* tv = findKey(rec, recEnd, "\"title\":");
+    const char* dv = findKey(rec, recEnd, "\"showTime\":");
+    if (cv && tv) {
+      memset(&out[n], 0, sizeof(NewsItem));
+      copyVal(out[n].title, sizeof(out[n].title), tv, recEnd);
+      copyVal(out[n].code,  sizeof(out[n].code),  cv, recEnd);
+      if (sv) copyVal(out[n].summary, sizeof(out[n].summary), sv, recEnd);
+      else    out[n].summary[0] = 0;      // 摘要缺失 -> 自动降级为纯标题
+      if (dv) copyVal(out[n].time, sizeof(out[n].time), dv, recEnd);
+      else    out[n].time[0] = 0;
+      out[n].src = 0;
+      if (out[n].title[0] && out[n].code[0]) n++;
+    }
+    if (!next) break;
+    p = next;
   }
-  if (src == SRC_FIN) g_newsDiag.finCount = n;
-  else                 g_newsDiag.techCount = n;
   return n;
 }
 
-// 抓取 + 合并(财经/科技交替, 免得一屏全是一类)
+static void failAndBackoff() {
+  s_lastFetch = millis();
+  s_retryAt   = millis() + 60000UL;   // 失败后 60 秒再试, 别疯转
+  g_newsDiag.lastErrMs = millis();
+  s_fetching = false;
+}
+
 static void doFetch() {
   if (WiFi.status() != WL_CONNECTED) return;
   s_fetching = true;
   g_newsDiag.lastTryMs = millis();
+  g_newsDiag.httpCode = 0;
 
-  static NewsItem bufA[8], bufB[8];
-  int na = 0, nb = 0;
+  WiFiClient client;
+  HTTPClient http;
+  http.setConnectTimeout(5000);
+  http.setTimeout(9000);
+  if (!http.begin(client, NEWS_URL)) { failAndBackoff(); return; }
+  http.addHeader("Referer", NEWS_REF);
+  http.addHeader("User-Agent", "Mozilla/5.0 (ESP32)");
+  int code = http.GET();
+  g_newsDiag.httpCode = code;
+  if (code != 200) { http.end(); failAndBackoff(); return; }
+  String body = http.getString();
+  http.end();
 
-  // g_newsSrc: 0=财经+科技 1=只看财经 2=只看科技
-  bool wantFin  = (g_newsSrc == 0 || g_newsSrc == 1);
-  bool wantTech = (g_newsSrc == 0 || g_newsSrc == 2);
+  static NewsItem buf[MAX_NEWS];       // 约 7.6KB 静态, 不占栈
+  int n = parseFastNews(body, buf, MAX_NEWS);
+  g_newsDiag.parsed = n;
+  if (n == 0) { failAndBackoff(); return; }
 
-  if (wantFin)  na = fetchInto(bufA, 8, URL_FIN,  REF_FIN,  SRC_FIN);
-  if (wantTech) nb = fetchInto(bufB, 8, URL_TECH, REF_TECH, SRC_TECH);
-
-  int total = na + nb;
-  if (total == 0) {
-    // 没网/接口抽风: 保留旧内容, 90 秒后再试。
-    // ★ 不能写成 s_lastFetch = millis() - refSec*1000 + 90000:
-    //   refSec 最小 60 秒时 60000-90000 会无符号回绕, 变成"永远到点", 任务会疯狂重抓。
-    s_lastFetch = millis();
-    s_retryAt   = millis() + 90000UL;
-    Serial.println("[News] 本次没抓到, 保留旧内容");
-    s_fetching = false;
-    return;
-  }
-
-  // 写进共享区(加锁, 别让 UI 读到半条): 财经/科技交替
-  if (s_mux && xSemaphoreTake(s_mux, pdMS_TO_TICKS(200)) == pdTRUE) {
-    int o = 0;
-    for (int i = 0; i < 8 && o < MAX_NEWS; i++) {
-      if (i < na) g_news[o++] = bufA[i];
-      if (i < nb && o < MAX_NEWS) g_news[o++] = bufB[i];
+  // 按唯一 code 计算「本次新增几条」: 从最新一条往下数, 遇到上次的最新码即止。
+  // 首次启动(s_lastCode 为空)不报 NEW, 否则一开机 20 条全标成未读。
+  int fresh = 0;
+  if (s_lastCode[0]) {
+    for (int i = 0; i < n; i++) {
+      if (!strcmp(buf[i].code, s_lastCode)) break;
+      fresh++;
     }
-    g_nNews = (uint8_t)o;
-    if (g_curNews >= o) g_curNews = 0;
+    if (fresh > 0) {
+      int v = (int)g_newsNew + fresh;
+      g_newsNew = (uint8_t)(v > 99 ? 99 : v);
+    }
+  }
+  strncpy(s_lastCode, buf[0].code, sizeof(s_lastCode) - 1);
+  s_lastCode[sizeof(s_lastCode) - 1] = 0;
+
+  if (s_mux && xSemaphoreTake(s_mux, pdMS_TO_TICKS(200)) == pdTRUE) {
+    memcpy(g_news, buf, (size_t)n * sizeof(NewsItem));
+    g_nNews = (uint8_t)n;
+    if (g_curNews >= n) g_curNews = 0;
     xSemaphoreGive(s_mux);
   }
-
   s_lastFetch = millis();
   s_retryAt   = 0;
-  s_okCount++;
-  Serial.printf("[News] 抓到 %d 条 (财经%d 科技%d)\n", total, na, nb);
+  g_newsDiag.lastOkMs  = millis();
+  g_newsDiag.fetchCount++;
   s_fetching = false;
 }
 
@@ -173,13 +167,17 @@ void newsInit() {
   if (!s_mux) s_mux = xSemaphoreCreateMutex();
   g_nNews = 0;
   g_curNews = 0;
+  g_newsNew = 0;
+  s_lastCode[0] = 0;
 }
 
 void newsKick() { s_kick = true; }
-
 bool newsReady() { return g_nNews > 0; }
 uint32_t newsUpdatedAt() { return s_lastFetch; }
-uint16_t newsRefreshCount() { return s_okCount; }
+uint16_t newsRefreshCount() { return g_newsDiag.fetchCount; }
+uint8_t  newsTakeNew() { uint8_t v = g_newsNew; g_newsNew = 0; return v; }
+bool newsLock(uint32_t ms) { return s_mux && xSemaphoreTake(s_mux, pdMS_TO_TICKS(ms)) == pdTRUE; }
+void newsUnlock() { if (s_mux) xSemaphoreGive(s_mux); }
 
 void newsNext() {
   if (g_nNews == 0) return;
@@ -198,15 +196,15 @@ void newsSelect(int i) {
 
 void newsTask(void* arg) {
   (void)arg;
-  vTaskDelay(pdMS_TO_TICKS(4000));      // 等 WiFi 起来
+  vTaskDelay(pdMS_TO_TICKS(5000));      // 等 WiFi 起来, 与行情任务错峰
   for (;;) {
-    bool due = (s_lastFetch == 0) ||
-               (millis() - s_lastFetch >= (uint32_t)g_newsRefSec * 1000UL);
-    if (s_retryAt && (int32_t)(millis() - s_retryAt) < 0) due = false;  // 退避期内不重试
-    if ((due || s_kick) && !s_fetching) {
+    bool due = g_newsOn &&
+               (s_kick || s_lastFetch == 0 ||
+                (millis() - s_lastFetch >= (uint32_t)g_newsRefSec * 1000UL));
+    if (due && !s_fetching && (!s_retryAt || (int32_t)(millis() - s_retryAt) >= 0)) {
       s_kick = false;
       doFetch();
     }
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }

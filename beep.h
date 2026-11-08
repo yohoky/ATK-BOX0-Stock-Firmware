@@ -26,3 +26,12 @@ uint32_t beepCallCount();
 int      beepLastErr();
 uint32_t beepWrittenBytes();   // 最近一次 I2S 写入字节数(0=没写出去)
 int      beepWriteRet();       // i2s_channel_write 返回码(0=ESP_OK)
+
+// ---- v7.2: I2S 运行时归属切换 ----
+// 用户确认「提示音和 MP3 不会同时播放」, 因此可以分时共用 I2S_NUM_0:
+//   进收音机模式: beepReleaseI2S() 删掉 beep 常驻通道 -> radioEnsure() 创建 Audio 解码器
+//   退回股票模式: radioRelease() 析构 Audio -> beepResumeI2S() 重建 beep 通道
+// 收音机模式下 beepAlert() 自动静默(屏幕提醒照常), 不会与 MP3 抢 I2S。
+void beepReleaseI2S();
+void beepResumeI2S();
+bool beepAudioOwnsI2S();

@@ -9,6 +9,8 @@
 #define STA_URL_LEN   128
 #define STK_CODE_LEN  14
 
+// v7.2: 实时财经快讯(标题+摘要, 60秒自动更新) / 三连M进新闻 / 四连M进收音机
+//       / 菜单切换股票·收音机工作模式 / I2S 运行时归属切换(提示音与MP3互斥) / 版本更新说明
 // v7.1: 信息更新/预警提示两套独立时间范围 / 每只股票独立提醒阈值(互不影响)
 //       / 修自动关机(M键常态低电平误唤醒) / 自动显示模式改为真正可用的定时切换
 //       / 状态栏已连WiFi只留图标 / 完整 merged 固件
@@ -18,16 +20,32 @@
 // v6.1.1: 修 Web load() 访问已删除的电台控件导致设置项加载不全
 // v6.1: 修 ES8311 0x32 音量(本机无声) / 去掉 beep 时 CODEC_PWR 断电毛刺(USB 重枚举)
 //       / M 键高电平有效 / 电池官方标定 / I2C 假地址
-#define FW_VERSION    "v7.1"
+#define FW_VERSION    "v7.2"
 
-// 电台功能开关: 用户反馈在线电台在本网络下播不出声音, 已停用(2026-11)
-//   代码与网页接口保留, 改成 1 重新编译即可恢复
-#define ENABLE_RADIO  0
+// v7.2 恢复网络电台: 播放链路沿用原厂 ES8311 上电序列 + I2S 引脚。
+// 提示音与 MP3 不会同时播放: 进收音机模式时 beep 释放 I2S 通道交给解码器,
+// 退回股票模式再还给 beep(见 radioEnsure/radioRelease + beepReleaseI2S)。
+#define ENABLE_RADIO  1
 
-// 新闻条
-#define MAX_NEWS      32
-#define NEWS_TITLE    116   // utf8 字节(≈38 汉字), 底部两行最多显示 24 字
-#define NEWS_SRC      3     // 新闻分类数: 0财经+科技 1财经 2科技
+// ---- 版本更新说明(设备信息页显示, 每条 1-100 字) ----
+#define FW_NOTES "新增实时财经快讯(标题+摘要,60秒自动更新)、三连M进新闻、四连M进收音机、菜单可切股票/收音机模式;提示音与MP3互斥,并修复模式切换时的看门狗复位。"
+struct FwNote { const char* ver; const char* text; };
+extern const FwNote FW_HISTORY[];
+extern const int    FW_HISTORY_N;
+
+// ---- v7.2 工作模式 ----
+enum AppMode { APP_STOCK = 0, APP_RADIO = 1 };
+extern volatile uint8_t g_appMode;   // 不落盘: 开机一律回股票模式, 避免半夜自动放广播
+// 网页在 async_tcp 任务里只置这个标志, 真正的 I2S 交接/解码器创建由主 loop 执行
+extern volatile int8_t  g_pendingMode;  // -1=无请求, APP_STOCK/APP_RADIO=待切换
+
+// 实时新闻(东方财富 7x24 快讯, HTTP 明文, 标题 + 摘要)
+#define MAX_NEWS      20
+#define NEWS_TITLE    116   // utf8 字节(≈38 汉字)
+#define NEWS_SUMMARY  220   // utf8 字节(≈73 汉字), 摘要可分行显示
+#define NEWS_CODE     24    // 唯一 ID, 用于按条去重
+#define NEWS_TIME     20    // "2026-11-09 01:20:00"
+#define NEWS_SRC      3     // 保留兼容: 0=全部快讯 1=只看财经 2=只看科技
 
 // 股票显示模式
 #define DISP_ONE      0    // 单只大屏: 大字现价 + 涨跌 + 开高低额
@@ -117,6 +135,8 @@ extern uint8_t  g_newsOn;      // 1=底部显示新闻条, 0=不显示
 extern uint8_t  g_newsSec;     // 每条新闻停留秒数(3-30)
 extern uint16_t g_newsRefSec;  // 重新抓取的间隔秒数(60-3600)
 extern uint8_t  g_newsSrc;     // 0=财经+科技 1=只看财经 2=只看科技
+extern uint8_t  g_newsBeep;    // v7.2: 1=新快讯到达响一声(仍受预警时段约束), 0=只角标/toast(默认)
+extern uint8_t  g_newsSummary; // v7.2: 1=新闻页显示摘要(默认), 0=只显示标题
 // ---- v7.1 两套独立时间范围 ----
 extern TimeWindow g_fetchWin;   // 「信息更新」时段: 该时段内按 refresh 秒抓行情
 extern TimeWindow g_alertWin;   // 「预警提示」时段: 该时段内才检查涨跌阈值并响铃

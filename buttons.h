@@ -11,6 +11,8 @@ enum BtnEvent {
   BTN_L_SHORT, BTN_L_LONG,
   BTN_R_SHORT, BTN_R_LONG,
   BTN_M_SHORT, BTN_M_LONG, BTN_M_DOUBLE,
+  BTN_M_TRIPLE,        // v7.2: 连续按三次 M -> 新闻页
+  BTN_M_QUAD,          // v7.2: 连续按四次 M -> 收音机模式
   BTN_LR_SHORT,     // 左右同时短按 = 等效中键短按(中键不灵时的兜底)
   BTN_LR_LONG,      // 左右同时按住 1.5 秒 = 关机
   BTN_MR_LONG       // 中键+右键同时按住 3 秒 = 强制进下载模式

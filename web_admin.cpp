@@ -5,6 +5,7 @@
 #include "ui_display.h"
 #include "wifi_mgr.h"
 #include "gyro_imu.h"
+#include "news_feed.h"
 #include "buttons.h"
 #include "beep.h"
 #include "cfg_pins.h"
@@ -12,6 +13,7 @@
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <esp_random.h>
+#include <esp_system.h>
 #include <Update.h>
 #include <time.h>
 
@@ -173,6 +175,53 @@ box-shadow:0 4px 16px rgba(0,0,0,.5);max-width:90%;text-align:center}
 </div>
 
 <div class="tab" id=t1>
+  <h3>工作模式 (v7.2)</h3>
+  <div class=card>
+    当前：<b id=modenow>-</b><br>
+    <div class=row>
+      <button class="act gray" onclick="setMode(0)">股票行情</button>
+      <button class="act gray" onclick="setMode(1)">网络收音机</button>
+    </div>
+    <div class=hint>盒子菜单第 13 项「工作模式」也能切。<b>连续按四次 M</b> 直接进收音机，
+    <b>连续按三次 M</b> 进实时快讯。提示音与 MP3 不会同时播放：切换时 I2S 通道自动交接，
+    股票模式提醒音照常，收音机模式提醒音静默。</div>
+    <div class=row>
+      <button class="act gray" onclick="radioCmd('prev')">上一台</button>
+      <button class="act gray" onclick="radioCmd('next')">下一台</button>
+    </div>
+    <div class=row>
+      <button class="act gray" onclick="radioCmd('toggle')">播放 / 暂停</button>
+      <button class="act gray" onclick="radioCmd('stop')">停止</button>
+    </div>
+    <div id=radiostat class=hint>电台状态读取中…</div>
+  </div>
+
+  <h3>实时快讯 (v7.2)</h3>
+  <div class=card>
+    <div class=row>
+      <div><label>快讯功能</label><select id=nson>
+        <option value=1>开启（自动更新）</option><option value=0>关闭</option></select></div>
+      <div><label>轮询间隔</label><select id=nsref>
+        <option value=30>30 秒</option><option value=60>60 秒</option>
+        <option value=180>3 分钟</option><option value=300>5 分钟</option></select></div>
+    </div>
+    <div class=row>
+      <div><label>摘要内容</label><select id=nssum>
+        <option value=1>标题 + 摘要</option><option value=0>只显示标题</option></select></div>
+      <div><label>新消息提示音</label><select id=nsbeep>
+        <option value=0>不响（只角标）</option><option value=1>响一声</option></select></div>
+    </div>
+    <div class=hint>东方财富 7×24 快讯，HTTP 明文约 6KB，每轮取 20 条，按唯一编号去重。
+    抓到「大致内容」（标题 + 约 110 字摘要），摘要缺失自动降级为纯标题。新消息在状态栏显示红点，
+    提示音默认关闭且仍受「预警提示」时段约束。</div>
+    <div class=row>
+      <button class="act gray" onclick=refreshNews()>立即抓取</button>
+      <button class="act gray" onclick=showNews()>查看快讯 JSON</button>
+    </div>
+    <div id=newsstat class=hint>读取中…</div>
+    <button class=act onclick=saveSet()>保存新闻与模式设置</button>
+  </div>
+
   <h3>显示</h3>
   <label>股票显示方式</label>
   <select id=disp onchange="post('/api/settings',{disp:+this.value})">
@@ -293,6 +342,10 @@ box-shadow:0 4px 16px rgba(0,0,0,.5);max-width:90%;text-align:center}
   <div class=card id=wplist>读取中...</div>
   <div class=hint>保存过的网络会记住密码。换地点（家/公司）时设备自动扫描并连接信号最好的已存网络，<b>不用重新配网</b>；这里可一键切换或删除。</div>
 
+  <h3>版本更新说明</h3>
+  <div class=card id=fwnotes>读取中…</div>
+  <div class=hint>每个版本一段 1-100 字的更新摘要；盒子「设备信息」页也会显示当前版本说明。</div>
+
   <h3>设备</h3>
   <div class=card><div id=info></div></div>
   <button class="act gray" onclick=showDiag()>查看诊断 JSON</button>
@@ -376,6 +429,14 @@ function paint(d){
     e.innerHTML=t;
   }
   var i=document.getElementById('info');if(i)i.innerText=d.info;
+  // v7.2: 模式 / 电台 / 快讯状态(每 4 秒 poll 刷新)
+  var mn=document.getElementById('modenow');
+  if(mn)mn.innerText=d.appmode==1?'网络收音机':'股票行情';
+  var rs=document.getElementById('radiostat');
+  if(rs)rs.innerText='电台 '+esc(d.radioStateText||'-')+' · 码率 '+Math.round((d.bitrate||0)/1000)+' kbps · 音量 '+d.volume;
+  var ns=document.getElementById('newsstat');
+  if(ns)ns.innerText='已缓存 '+(d.newsCount||0)+' 条 · 未读 '+(d.newsNew||0)+' · HTTP '+(d.newsHttp||0)+
+    ' · '+(d.newsAgo===null||d.newsAgo===undefined?'尚未抓取':d.newsAgo+' 秒前更新');
 }
 async function load(){
   var r=await fetch('/api/cfg',{cache:'no-store'});
@@ -399,8 +460,14 @@ async function load(){
   document.getElementById('ssid').value=CFG.ssid;
   document.getElementById('twkd').value=CFG.twkd;
   document.getElementById('ftout').value=CFG.ftout;
+  // v7.2 实时快讯
+  document.getElementById('nson').value=CFG.newson;
+  document.getElementById('nsref').value=CFG.nsref;
+  document.getElementById('nssum').value=CFG.nssum;
+  document.getElementById('nsbeep').value=CFG.nsbeep;
   putWin('f',CFG.fetchwin); putWin('a',CFG.alertwin);
   var fv=document.getElementById('fwver');if(fv)fv.innerText=CFG.version||'-';
+  renderFwNotes();
   renderWifiList();
   renderPer();
   paint(CFG);
@@ -449,6 +516,33 @@ async function doImu(){
     box.textContent='扫描超时，请稍后访问 /api/imu?get=1 查看结果';
   }catch(e){box.textContent='扫描失败: '+e}
 }
+// ---------- v7.2: 版本说明 / 工作模式 / 实时快讯 ----------
+function renderFwNotes(){
+  var box=document.getElementById('fwnotes');if(!box)return;
+  var h='<b style="color:#1d9e75">'+esc(CFG.version||'-')+'</b><br>'+esc(CFG.fwNotes||'')+
+        '<hr style="border:0;border-top:1px solid #333;margin:8px 0">';
+  var a=CFG.fwHistory||[];
+  for(var i=0;i<a.length;i++)
+    h+='<div style="margin:6px 0"><b style="color:#1d9e75">'+esc(a[i].v)+'</b> '+esc(a[i].t)+'</div>';
+  box.innerHTML=h;
+}
+async function setMode(m){
+  var d=await post('/api/mode',{mode:m});
+  if(d&&d.ok)setTimeout(poll,900);
+}
+function radioCmd(c){post('/api/radio',{cmd:c}).then(function(){setTimeout(poll,700)})}
+async function refreshNews(){
+  msg('正在抓取快讯…');
+  try{
+    var r=await fetch('/api/news?kick=1',{cache:'no-store'}),j=await r.json();
+    msg('抓到 '+(j.count||0)+' 条快讯');setTimeout(poll,700);
+  }catch(e){msg('抓取失败',false)}
+}
+async function showNews(){
+  var p=document.getElementById('diagbox');p.style.display='block';p.innerText='读取中…';
+  try{var r=await fetch('/api/news',{cache:'no-store'});p.innerText=JSON.stringify(await r.json(),null,2)}
+  catch(e){p.innerText='读取失败：'+e}
+}
 var QK=[['上证指数','sh000001'],['深证成指','sz399001'],['创业板指','sz399006'],
 ['贵州茅台','sh600519'],['宁德时代','sz300750'],['比亚迪','sz002594'],
 ['腾讯控股','rt_hk00700'],['阿里巴巴','rt_hk09988'],['苹果','gb_aapl'],['英伟达','gb_nvda']];
@@ -481,6 +575,10 @@ function saveSet(){
          altpct:+document.getElementById('altpct').value,
          twkd:+document.getElementById('twkd').value,
          ftout:+document.getElementById('ftout').value,
+         newson:+document.getElementById('nson').value,
+         nsref:+document.getElementById('nsref').value,
+         nssum:+document.getElementById('nssum').value,
+         nsbeep:+document.getElementById('nsbeep').value,
          fetchwin:getWin('f'),
          alertwin:getWin('a')};
   var per=[],els=document.querySelectorAll('[data-per]');
@@ -607,6 +705,8 @@ var APIS=[
  ['GET','/api/scan','触发 WiFi 扫描'],
  ['GET','/api/imu','触发严格 I2C 探测'],
  ['GET','/api/imu?get=1','读取 I2C 探测结果'],
+ ['GET','/api/news','读取实时快讯缓存（标题+摘要）'],
+ ['GET','/api/news?kick=1','立即抓取一次快讯'],
  ['POST','/api/beep','测试提示音'],
  ['POST','/api/refresh','立即刷新行情'],
  ['POST','/api/reconnect','重新连接 WiFi']
@@ -769,7 +869,34 @@ static void handleCfg(AsyncWebServerRequest* r) {
   j["bitrate"] = g_radioBitrate;
   j["codecOk"] = g_codecOk;
 
-  char info[224];
+  // ---- v7.2: 工作模式 / 实时快讯 / 版本更新说明 ----
+  j["appmode"] = (int)g_appMode;
+  j["newson"]  = g_newsOn;
+  j["nsref"]   = g_newsRefSec;
+  j["nssum"]   = g_newsSummary;
+  j["nsbeep"]  = g_newsBeep;
+  j["fwNotes"] = FW_NOTES;
+  JsonArray hist = j["fwHistory"].to<JsonArray>();
+  for (int i = 0; i < FW_HISTORY_N; i++) {
+    JsonObject o = hist.add<JsonObject>();
+    o["v"] = FW_HISTORY[i].ver;
+    o["t"] = FW_HISTORY[i].text;
+  }
+  j["newsCount"] = (int)g_nNews;
+  j["newsNew"]   = (int)g_newsNew;
+  j["newsHttp"]  = g_newsDiag.httpCode;
+  j["newsAgo"]   = newsUpdatedAt() ? (millis() - newsUpdatedAt()) / 1000 : 0;
+  const char* rst = "停止";
+  switch (g_radioState) {
+    case RADIO_PLAYING:    rst = "播放中"; break;
+    case RADIO_CONNECTING: rst = "连接中"; break;
+    case RADIO_PAUSED:     rst = "已暂停"; break;
+    case RADIO_ERROR:      rst = "重连中"; break;
+    default: break;
+  }
+  j["radioStateText"] = rst;
+
+  char info[512];
   uint32_t up = millis() / 1000;
 #if ENABLE_RADIO
   snprintf(info, sizeof(info),
@@ -788,6 +915,9 @@ static void handleCfg(AsyncWebServerRequest* r) {
            (unsigned)g_bright, (unsigned)g_volume,
            (unsigned)g_autoOffMin, poffName(g_powerOffMin));
 #endif
+  // v7.2: 设备信息里也带上当前版本更新说明(1-100 字)
+  strncat(info, "\n更新 ", sizeof(info) - strlen(info) - 1);
+  strncat(info, FW_NOTES, sizeof(info) - strlen(info) - 1);
   j["info"] = info;
   resp->setLength();
   r->send(resp);
@@ -799,6 +929,25 @@ static void handleDiag(AsyncWebServerRequest* r) {
   JsonVariant j = resp->getRoot();
 
   j["fw"] = FW_VERSION;
+  j["fwNotes"] = FW_NOTES;
+  // ---- v7.2 工作模式 / I2S 归属 / 实时快讯 / 收音机 ----
+  j["appMode"] = (int)g_appMode;
+  // 调试: 1=POWERON 2=SW 3=PANIC 4=INT_WDT 5=TASK_WDT 6=WDT 7=DEEPSLEEP ...
+  j["resetReason"] = (int)esp_reset_reason();
+  j["radioStage"] = radioStage();   // RTC_NOINIT 标记, 重启后仍能看到崩在哪一步
+  j["i2sOwner"] = beepAudioOwnsI2S() ? "beep" : "radio";
+  j["radioActive"] = radioActive();
+  j["radioState"] = (int)g_radioState;
+  j["radioBitrate"] = g_radioBitrate;
+  j["radioSec"] = g_radioSec;
+  j["newsOn"] = g_newsOn;
+  j["newsRefSec"] = g_newsRefSec;
+  j["newsCount"] = (int)g_nNews;
+  j["newsNew"] = (int)g_newsNew;
+  j["newsHttp"] = g_newsDiag.httpCode;
+  j["newsParsed"] = g_newsDiag.parsed;
+  j["newsFetches"] = g_newsDiag.fetchCount;
+  j["newsAgoS"] = newsUpdatedAt() ? (int)((millis() - newsUpdatedAt()) / 1000) : -1;
   j["heap"] = (unsigned)(ESP.getFreeHeap() / 1024);
   j["psram"] = (unsigned)(ESP.getPsramSize() >> 20);
 
@@ -1052,6 +1201,11 @@ static void handleSettings(AsyncWebServerRequest* r, String& body) {
     g_displayMode = (d >= DISP_ONE && d <= DISP_AUTO) ? d : DISP_LIST;
   }
   if (!doc["gyro"].isNull())  g_gyroOn = ((int)doc["gyro"]) ? 1 : 0;
+  // ---- v7.2 实时快讯 ----
+  if (!doc["newson"].isNull())  g_newsOn      = ((int)doc["newson"]) ? 1 : 0;
+  if (!doc["nssum"].isNull())   g_newsSummary = ((int)doc["nssum"])  ? 1 : 0;
+  if (!doc["nsbeep"].isNull())  g_newsBeep    = ((int)doc["nsbeep"]) ? 1 : 0;
+  if (!doc["nsref"].isNull())   g_newsRefSec  = (uint16_t)constrain((int)doc["nsref"], 30, 3600);
   if (!doc["alton"].isNull()) g_alertOn = ((int)doc["alton"]) ? 1 : 0;
   if (!doc["altpct"].isNull()) {
     float p = (float)doc["altpct"];
@@ -1130,8 +1284,55 @@ static void handleRadio(AsyncWebServerRequest* r, String& body) {
     radioStop(); uiFlashRadioLine(); uiInvalidate(); uiTouch();
   } else if (!strcmp(cmd, "next")) {
     radioNextStation(); uiFlashRadioLine(); uiTouch();
+  } else if (!strcmp(cmd, "prev")) {
+    if (g_nStation > 0) {
+      int nx = (g_curStation - 1 + g_nStation) % g_nStation;
+      radioPlay(nx); uiFlashRadioLine(); uiTouch();
+    }
   } else if (!strcmp(cmd, "play")) {
     radioPlay((int)(doc["idx"] | g_curStation)); uiFlashRadioLine();
+  } else if (!strcmp(cmd, "mode")) {
+    // 只置标志, 真正的 I2S 交接与解码器创建在主 loop 执行
+    int m = (int)(doc["mode"] | 0);
+    g_pendingMode = (m == APP_RADIO) ? APP_RADIO : APP_STOCK;
+  }
+  sendOk(r, true);
+}
+
+// v7.2 实时快讯缓存: GET /api/news, 带 kick=1 时顺手触发一次立即抓取
+static void handleNews(AsyncWebServerRequest* r) {
+  if (r->hasParam("kick")) newsKick();
+  AsyncJsonResponse* resp = new AsyncJsonResponse(false);
+  JsonVariant j = resp->getRoot();
+  j["ok"]     = true;
+  j["http"]   = g_newsDiag.httpCode;
+  j["parsed"] = g_newsDiag.parsed;
+  j["fetches"] = g_newsDiag.fetchCount;
+  j["agoS"]   = newsUpdatedAt() ? (int)((millis() - newsUpdatedAt()) / 1000) : -1;
+  j["new"]    = (int)g_newsNew;
+  JsonArray arr = j["list"].to<JsonArray>();
+  if (newsLock(200)) {
+    for (int i = 0; i < g_nNews; i++) {
+      JsonObject o = arr.add<JsonObject>();
+      o["t"] = g_news[i].title;
+      o["s"] = g_news[i].summary;
+      o["c"] = g_news[i].code;
+      o["time"] = g_news[i].time;
+    }
+    newsUnlock();
+  }
+  j["count"] = (int)arr.size();
+  resp->setLength();
+  r->send(resp);
+}
+
+// v7.2 工作模式: 网页只置 g_pendingMode, 主 loop 里做 setAppMode()
+static void handleMode(AsyncWebServerRequest* r, String& body) {
+  JsonDocument doc;
+  deserializeJson(doc, body);
+  if (!doc["mode"].isNull()) {
+    int m = (int)doc["mode"];
+    if (m == APP_STOCK || m == APP_RADIO) g_pendingMode = (int8_t)m;
   }
   sendOk(r, true);
 }
@@ -1291,11 +1492,17 @@ void webBegin() {
     handleDiag(r);
   });
 
+  server.on("/api/news", HTTP_GET, [](AsyncWebServerRequest* r) {
+    if (!isAuthed(r)) { r->send(401); return; }
+    handleNews(r);
+  });
+
   // 统一约定: POST /api/xxx?d=<urlencode(json)>
   server.on("/api/stocks",   HTTP_POST, _post(handleStocks),   nullptr, collectBody);
   server.on("/api/stations", HTTP_POST, _post(handleStations), nullptr, collectBody);
   server.on("/api/settings", HTTP_POST, _post(handleSettings), nullptr, collectBody);
   server.on("/api/radio",    HTTP_POST, _post(handleRadio),    nullptr, collectBody);
+  server.on("/api/mode",     HTTP_POST, _post(handleMode),     nullptr, collectBody);
   server.on("/api/beep",     HTTP_POST, _post(handleBeep),     nullptr, collectBody);
   server.on("/api/wifi",     HTTP_POST, _post(handleWifi),     nullptr, collectBody);
   server.on("/api/wifisel",  HTTP_POST, _post(handleWifiSel),  nullptr, collectBody);

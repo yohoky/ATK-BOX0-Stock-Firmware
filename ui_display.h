@@ -55,7 +55,8 @@ enum UiScene {
   SCENE_ADJ,        // 菜单内调节(亮度/音量)
   SCENE_INFO,       // 设备信息(诊断页)
   SCENE_CONFIRM,    // 关机/恢复出厂二次确认
-  SCENE_NEWS        // 新闻列表子页(浏览/定位到某条)
+  SCENE_NEWS,       // v7.2 实时快讯子页(标题 + 摘要)
+  SCENE_RADIO       // v7.2 收音机全屏页
 };
 
 // 菜单项: 顺序必须与 ui_display.cpp 的 MENU_NAME 一致, 所以放在头文件里共用
@@ -72,6 +73,8 @@ enum MenuIdx {
   MENU_INFO,        // 设备信息
   MENU_RESET,       // 恢复出厂
   MENU_POWER,       // 关机
+  MENU_MODE,        // v7.2 工作模式: 股票 / 收音机
+  MENU_NEWS,        // v7.2 实时快讯(三连 M 的兜底入口)
   MENU_N
 };
 
@@ -80,6 +83,7 @@ extern volatile int     g_menuSel;
 extern volatile uint8_t g_menuListN;
 extern volatile int     g_stationSel;   // 电台子页光标(电台已停用, 保留)
 extern volatile int     g_newsSel;      // 新闻子页光标
+extern volatile uint8_t g_newsDetail;   // v7.2: 1=新闻页展开全文摘要, 0=列表+预览
 
 void uiInit();
 void uiInvalidate();          // 请求整页重绘

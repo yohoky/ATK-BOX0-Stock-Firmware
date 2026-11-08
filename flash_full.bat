@@ -24,7 +24,7 @@ if not exist "%ESPTOOL%" (
   goto :end
 )
 
-set "BIN=%~dp0firmware\box0_stock_v7.1_full_0x0.bin"
+set "BIN=%~dp0firmware\box0_stock_v7.2_full_0x0.bin"
 if not exist "%BIN%" (
   echo [ERR] 完整固件不存在: %BIN%
   goto :end
@@ -32,7 +32,7 @@ if not exist "%BIN%" (
 
 echo.
 echo  Port : %PORT%
-echo  Image: %BIN%  -^> 0x0  (3.1 MB, 含 bootloader + 分区表)
+echo  Image: v7.2 完整镜像  -^> 0x0  (3.1 MB, 含 bootloader + 分区表)
 echo  这一步会整片擦除 Flash, 配置将恢复出厂。
 echo.
 choice /C YN /M "确认继续"

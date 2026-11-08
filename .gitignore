@@ -9,6 +9,7 @@ build*/
 Thumbs.db
 *.bak
 *.tmp
+*.log
 __pycache__/
 *.pyc
 .vscode/

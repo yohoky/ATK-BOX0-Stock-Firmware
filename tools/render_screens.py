@@ -90,9 +90,12 @@ STOCKS = [
 ]
 
 
-def statusbar(d):
-    """v7.1 状态栏 6 项: 星期 / 时间 / 页码 / 音量 / 电量 / WiFi(已连接只显示图标)"""
+def statusbar(d, news_new=False):
+    """状态栏 6 项: 星期 / 时间 / 页码 / 音量 / 电量 / WiFi(已连接只显示图标)
+    v7.2 另有「新快讯」红点, 进新闻页即清."""
     rect(d, 0, 0, W, 19, fill="#05070A")
+    if news_new:
+        rect(d, 116, 4, 5, 10, fill=UP)
     text(d, 3, 2, "周日", 10, FG)
     text(d, 42, 2, "00:12", 10, FG)
     text(d, 88, 2, "1/3", 10, ACC)
@@ -118,7 +121,7 @@ def statusbar(d):
 def draw_list():
     im, scr, pad = new_screen()
     d = ImageDraw.Draw(scr)
-    statusbar(d)
+    statusbar(d, True)          # v7.2: 有新快讯时状态栏出现红点
     for i, (name, price, chg, col) in enumerate(STOCKS):
         y = 21 + i * 36
         rect(d, 0, y, 3, 32, fill=col)
@@ -151,7 +154,8 @@ def draw_single():
     finish(im, scr, pad, "ui_single.png")
 
 
-MENU = ["显示模式", "轮播间隔", "刷新间隔", "涨跌提醒", "自动关机", "亮度", "音量"]
+MENU = ["显示模式", "轮播间隔", "刷新间隔", "涨跌提醒", "自动关机", "亮度", "音量",
+        "工作模式", "实时新闻"]   # v7.2: 菜单扩到 14 项, 此处展示末页附近
 
 
 def draw_menu():
@@ -160,17 +164,18 @@ def draw_menu():
     rect(d, 0, 0, W, 24, fill="#141A22")
     text(d, 8, 4, "菜单", 13, FG, bold=True)
     text(d, 232, 6, "M长按退出", 8, FLAT, anchor="ra")
-    vals = ["列表 6只/屏", "5 秒", "5 秒", "开 3.0%", "息屏后30分", "30%", "60"]
+    vals = ["列表 6只/屏", "5 秒", "5 秒", "开 3.0%", "息屏后30分", "30%", "60",
+            "股票", "10条"]
     for i, nm in enumerate(MENU):
-        y = 28 + i * 27
-        if i == 0:
-            rect(d, 4, y - 3, 232, 25, fill=SEL, radius=3)
-        c = "#0B0E14" if i == 0 else FG
-        text(d, 10, y, nm, 12, c, bold=True)
-        text(d, 230, y + 1, vals[i], 9, c if i == 0 else ACC, anchor="ra")
-    rect(d, 237, 26, 2, 175, fill=DIM)
-    rect(d, 237, 26, 2, 75, fill=ACC)
-    text(d, 6, 220, "左右选 M确定 双键返回", 8, FLAT)
+        y = 26 + i * 23
+        if i == 7:
+            rect(d, 4, y - 3, 232, 22, fill=SEL, radius=3)
+        c = "#0B0E14" if i == 7 else FG
+        text(d, 10, y, nm, 11, c, bold=True)
+        text(d, 230, y + 1, vals[i], 9, c if i == 7 else ACC, anchor="ra")
+    rect(d, 237, 26, 2, 188, fill=DIM)
+    rect(d, 237, 26, 2, 150, fill=ACC)
+    text(d, 6, 222, "左右选 M确定 双键返回 · 共14项", 8, FLAT)
     finish(im, scr, pad, "ui_menu.png")
 
 
@@ -209,7 +214,7 @@ def draw_statusbar_zoom():
 
 
 def draw_web():
-    """网页管理界面示意(升级 tab)"""
+    """v7.2 网页管理界面示意: 升级 / 工作模式 / 实时快讯 / 版本说明 / 接口面板"""
     S = 2
     globals()["S"] = S
     w, h = 520 * S, 660 * S
@@ -217,45 +222,158 @@ def draw_web():
     d = ImageDraw.Draw(im)
     rect(d, 10, 10, 500, 44, fill="#1B1B1B", outline="#2A2A2A", radius=10)
     text(d, 22, 20, "BOX0 股票固件 · 管理页", 13, FG, bold=True)
-    text(d, 498, 22, "v7.1", 9, FLAT, anchor="ra")
+    text(d, 498, 22, "v7.2", 9, FLAT, anchor="ra")
     tabs = ["股票", "设置", "设备", "升级"]
     for i, t in enumerate(tabs):
         x = 10 + i * 126
-        on = i == 3
+        on = (i == 3)
         rect(d, x, 62, 120, 30, fill=SEL if on else "#1B1B1B", radius=8)
         text(d, x + 60, 69, t, 11, "#FFFFFF" if on else "#999999", bold=on, anchor="ma")
-    rect(d, 10, 102, 500, 74, fill="#1B1B1B", radius=10)
-    text(d, 22, 112, "固件升级（网页 OTA）", 12, FG, bold=True)
-    text(d, 22, 134, "当前固件 v7.1  ·  选择 .bin 上传，约 12 秒自动重启", 9, FLAT)
-    text(d, 22, 152, "不用插 USB / 不用下载模式 / 不用按 RESET", 9, ACC)
-    rect(d, 10, 186, 500, 34, fill="#1A1A1A", outline="#333333", radius=8)
-    text(d, 22, 194, "选择文件   box0_stock_v7.1.bin", 9, FLAT)
-    rect(d, 10, 228, 500, 34, fill=SEL, radius=8)
-    text(d, 260, 236, "上传并升级", 11, "#FFFFFF", bold=True, anchor="ma")
-    rect(d, 10, 276, 500, 40, fill="#1B1B1B", radius=10)
-    text(d, 22, 286, "全部接口（点击即调用）", 11, FG, bold=True)
-    text(d, 22, 303, "/api/cfg  /api/diag  /api/imu  /api/scan  /api/beep ...", 8, ACC)
-    text(d, 10, 326, "已保存的 WiFi（最多 8 组 · 自动漫游 · 支持无密码）", 11, FG, bold=True)
+
+    # 1) OTA
+    rect(d, 10, 102, 500, 70, fill="#1B1B1B", radius=10)
+    text(d, 22, 110, "固件升级（网页 OTA）", 12, FG, bold=True)
+    text(d, 22, 130, "当前 v7.2 · 约 12 秒写完自动重启 · 不用 USB / 下载模式 / RESET", 9, FLAT)
+    rect(d, 22, 146, 300, 20, fill="#1A1A1A", outline="#333333", radius=6)
+    text(d, 28, 150, "box0_stock_v7.2.bin", 8, FLAT)
+    rect(d, 330, 146, 168, 20, fill=SEL, radius=6)
+    text(d, 414, 150, "上传并升级", 9, "#FFFFFF", bold=True, anchor="ma")
+
+    # 2) 工作模式
+    rect(d, 10, 180, 500, 76, fill="#1B1B1B", radius=10)
+    text(d, 22, 186, "工作模式（v7.2）", 12, FG, bold=True)
+    text(d, 498, 189, "当前：股票模式", 9, ACC, anchor="ra")
+    text(d, 22, 208, "开机一律股票模式 · 提示音与 MP3 自动交接 I2S", 9, FLAT)
+    for i, t in enumerate(["切换收音机", "上一台", "播放/暂停", "停止"]):
+        x = 22 + i * 122
+        rect(d, x, 228, 112, 20, fill="#26303A", radius=5)
+        text(d, x + 56, 232, t, 8, FG, anchor="ma")
+
+    # 3) 实时快讯
+    rect(d, 10, 262, 500, 76, fill="#1B1B1B", radius=10)
+    text(d, 22, 268, "实时快讯（v7.2）", 12, FG, bold=True)
+    text(d, 498, 271, "10 条 · 60 秒", 9, ACC, anchor="ra")
+    text(d, 22, 290, "东方财富 7×24 · 标题 + 摘要 · 按 code 去重", 9, FLAT)
+    for i, t in enumerate(["开 / 摘要 / 提示音", "60 秒", "立即抓取", "查看快讯"]):
+        x = 22 + i * 122
+        rect(d, x, 310, 112, 20, fill="#26303A", radius=5)
+        text(d, x + 56, 314, t, 8, ACC if i >= 2 else FG, anchor="ma")
+
+    # 4) 版本更新说明
+    rect(d, 10, 344, 500, 58, fill="#1B1B1B", radius=10)
+    text(d, 22, 350, "版本更新说明（设备信息页同步显示）", 11, FG, bold=True)
+    text(d, 22, 368, "v7.2 新增实时财经快讯、三连M进新闻、四连M进收音机、", 8, FLAT)
+    text(d, 22, 384, "菜单可切股票/收音机模式；提示音与MP3互斥…", 8, FLAT)
+
+    # 5) 接口面板
+    rect(d, 10, 408, 500, 34, fill="#1B1B1B", radius=10)
+    text(d, 22, 414, "全部接口（点击即调用）", 10, FG, bold=True)
+    text(d, 260, 415, "/api/cfg /api/diag /api/news /api/mode …", 8, ACC)
+
+    # 6) 历史 WiFi
+    text(d, 10, 448, "已保存的 WiFi（最多 8 组 · 自动漫游 · 支持无密码）", 10, FG, bold=True)
     for i, (nm, mark) in enumerate([("Home-2.4G", "★ 当前"), ("Office-Guest", "开放"), ("Coffee-5G", "")]):
-        y = 348 + i * 34
+        y = 466 + i * 34
         rect(d, 10, y, 500, 30, fill="#1A1A1A", outline="#2D2D2D", radius=8)
         label = ("★ " if mark.startswith("★") else "") + nm + ("  (开放)" if mark == "开放" else "")
         text(d, 22, y + 7, label, 9, FG)
         text(d, 498, y + 7, "连接    删除", 8, FLAT, anchor="ra")
-    rect(d, 10, 460, 500, 120, fill="#111111", outline="#333333", radius=8)
-    text(d, 22, 470, "GET /api/diag  ->  HTTP 200", 8, "#9CCC9C")
-    text(d, 22, 488, "{", 8, "#9CCC9C")
-    for i, ln in enumerate(['  "fw": "v7.1",', '  "inAlertWin": true,',
-                            '  "fetchWin": [540,690,780,900],', '  "alertEffective": [3,3,2.5,...]']):
-        text(d, 34, 502 + i * 15, ln, 8, "#9CCC9C")
-    rect(d, 10, 588, 500, 62, fill="#1B1B1B", radius=10)
-    text(d, 22, 596, "信息更新 / 预警提示 时段（可分别设置）", 10, FG, bold=True)
-    text(d, 22, 616, "上午 09:00–11:30   下午 13:00–15:00   ·   仅工作日", 9, ACC)
-    text(d, 22, 634, "全局阈值 3%  ·  每只股票独立阈值  ·  提醒总开关", 9, FLAT)
+
+    # 7) 诊断 JSON
+    rect(d, 10, 570, 500, 84, fill="#111111", outline="#333333", radius=8)
+    text(d, 22, 576, "GET /api/diag  ->  HTTP 200", 8, "#9CCC9C")
+    for i, ln in enumerate(['  "fw": "v7.2",  "appMode": 0,',
+                            '  "resetReason": 3,  "i2sOwner": "beep",',
+                            '  "newsCount": 10,  "newsHttp": 200,',
+                            '  "radioActive": false,  "codecOk": true']):
+        text(d, 34, 594 + i * 14, ln, 8, "#9CCC9C")
     p = os.path.join(OUT, "ui_web.png")
     im.save(p, optimize=True)
     print("  ->", p)
     globals()["S"] = 3
+
+
+def page_title(d, left, right):
+    """设备端 drawTitle(): 24px 标题栏"""
+    rect(d, 0, 0, W, 24, fill="#141A22")
+    text(d, 6, 3, left, 13, FG, bold=True)
+    text(d, 234, 6, right, 8, WARN if right.startswith("NEW") else ACC, anchor="ra")
+    line(d, 0, 24, W, 24, LINE)
+
+
+NEWS = [
+    ("英国工党据悉预计将下调英国汽车行业的电动汽车销售目标", "02:00"),
+    ("埃及列车脱轨事故已致7死112伤", "01:30"),
+    ("2026中国企业全球化报告 在第九届进博会首发", "01:05"),
+    ("央行：10月末外币贷款余额同比降幅继续收窄", "00:48"),
+    ("国内首个低空经济产业基金落地成都", "00:21"),
+]
+NEWS_SUM = "【埃及列车脱轨事故已致7死112伤】当地时间11月8日，根据埃及卫生部的最新通报，当天发生在吉萨省阿亚特地区的列车脱轨事故…"
+
+
+def draw_news():
+    """v7.2 实时快讯: 5 行标题 + 下方摘要预览"""
+    im, scr, pad = new_screen()
+    d = ImageDraw.Draw(scr)
+    page_title(d, "实时快讯", "NEW 3")
+    for k, (t, tm) in enumerate(NEWS):
+        y = 26 + k * 23
+        on = (k == 1)
+        if on:
+            rect(d, 0, y - 2, 240, 23, fill=SEL)
+        c = "#0B0E14" if on else FG
+        label = t if len(t) <= 18 else t[:17] + "…"
+        text(d, 4, y + 3, label, 10, c, bold=on)
+    line(d, 0, 142, W, 142, LINE, 2)
+    summary_lines = [
+        "【埃及列车脱轨事故已致7死112伤】",
+        "当地时间11月8日，根据埃及卫生部的最新",
+        "通报，当天发生在吉萨省阿亚特地区的列",
+        "车脱轨事故，已造成7人死亡、112人受伤…",
+    ]
+    for i, ln in enumerate(summary_lines):
+        text(d, 6, 150 + i * 17, ln, 9, FLAT)
+    text(d, 4, 222, "2/10", 9, FLAT)
+    text(d, 60, 222, "M展开全文  双击刷新", 9, FLAT)
+    finish(im, scr, pad, "ui_news.png")
+
+
+def draw_radio():
+    """v7.2 网络收音机全屏页"""
+    im, scr, pad = new_screen()
+    d = ImageDraw.Draw(scr)
+    page_title(d, "网络收音机", "四连M进入")
+    text(d, 8, 32, "1. 中央人民广播电台 中国之声", 11, ACC)
+    text(d, 8, 58, "正在播放", 11, DOWN)
+    text(d, 8, 80, "码率 64 kbps  播放 128s", 10, FLAT)
+    text(d, 8, 102, "（电台未提供曲名）", 10, DIM)
+    rect(d, 8, 128, 224, 12, fill="#212028")
+    rect(d, 8, 128, int(224 * 65 / 100), 12, fill=ACC)
+    text(d, 8, 146, "音量 65", 10, FG)
+    text(d, 8, 174, "左右短按 切台", 10, FLAT)
+    text(d, 8, 194, "M播放/暂停  双击停止", 10, FLAT)
+    text(d, 8, 216, "双键返回  M长按回股票", 10, FLAT)
+    finish(im, scr, pad, "ui_radio.png")
+
+
+def draw_info():
+    """v7.2 设备信息: 版本更新说明(1-100字) + 运行摘要"""
+    im, scr, pad = new_screen()
+    d = ImageDraw.Draw(scr)
+    page_title(d, "设备信息", "任意键返回")
+    text(d, 6, 26, "固件 v7.2  股票", 11, ACC)
+    notes = ["新增实时财经快讯(标题+摘要,60秒自动更新)、",
+             "三连M进新闻、四连M进收音机、菜单可切股票/",
+             "收音机模式;提示音与MP3互斥,并修复模式切",
+             "换时的看门狗复位。"]
+    for i, ln in enumerate(notes):
+        text(d, 6, 44 + i * 15, ln, 9, FG)
+    rows = ["网络 已连接", "IP 10.0.0.135  -46dBm", "音量60 亮度30 列表",
+            "内存118K PSRAM8M 运行9m", "快讯10条 12s前 电台0", "提醒开 3.0% 关机30分"]
+    for i, r in enumerate(rows):
+        text(d, 6, 108 + i * 18, r, 10, FLAT)
+    text(d, 6, 220, "左右同按=中键  长按=关机", 9, FLAT)
+    finish(im, scr, pad, "ui_info.png")
 
 
 def draw_overview():
@@ -269,16 +387,16 @@ def draw_overview():
     d.text((56, 60), "正点原子 BOX0 股票固件", font=Fbig, fill="#FFFFFF")
     d.text((58, 130), "ESP32-S3 · 240×240 桌面行情终端 · 网页管理 · OTA 升级", font=Fsub, fill=ACC)
     feats = ["• 14 只默认自选股，红涨绿跌，单只 / 列表一键切换",
-             "• 信息更新 / 预警提示两套可配时间窗口（默认交易时段）",
-             "• 全局 + 每只股票独立提醒阈值，互不干扰，可一键关闭",
-             "• 8 组历史 WiFi 自动漫游，状态栏 6 项，支持无密码网络",
-             "• 完整固件 0x0 一键刷入 + 网页 OTA 日常升级"]
+             "• 实时财经快讯：标题 + 摘要，60 秒自动更新，三连 M 查看",
+             "• 网络收音机：四连 M 或菜单切换，提示音与 MP3 智能让路",
+             "• 两套可配时间窗口 + 全局 / 每只股票独立提醒阈值",
+             "• 8 组历史 WiFi 漫游 · 完整固件 0x0 一键刷入 · 网页 OTA"]
     for i, f in enumerate(feats):
         d.text((58, 200 + i * 42), f, font=Ftag, fill="#B9C4CF")
-    d.text((58, 470), "M 短按切显示  ·  M 长按进菜单  ·  网页「升级」一键 OTA", font=Fsub, fill=SEL)
-    # 右侧三张缩略图
+    d.text((58, 470), "M 三连看快讯  ·  M 四连听广播  ·  网页「升级」一键 OTA", font=Fsub, fill=SEL)
+    # 右侧 2x2 缩略图
     thumbs = [("ui_list.png", 830, 60, 250), ("ui_single.png", 1100, 60, 250),
-              ("ui_menu.png", 965, 340, 250)]
+              ("ui_news.png", 830, 340, 250), ("ui_radio.png", 1100, 340, 250)]
     for fn, x, y, size in thumbs:
         p = os.path.join(OUT, fn)
         if not os.path.exists(p):
@@ -286,9 +404,9 @@ def draw_overview():
         t = Image.open(p).convert("RGB")
         t.thumbnail((size, size), Image.LANCZOS)
         im.paste(t, (x, y))
-    d.text((830, 320), "列表模式", font=Ftag, fill=FLAT)
-    d.text((1100, 320), "单只大屏", font=Ftag, fill=FLAT)
-    d.text((965, 600), "设置菜单", font=Ftag, fill=FLAT)
+    for x, y, lb in [(830, 320, "列表模式"), (1100, 320, "单只大屏"),
+                     (830, 600, "实时快讯"), (1100, 600, "网络收音机")]:
+        d.text((x, y), lb, font=Ftag, fill=FLAT)
     p = os.path.join(OUT, "overview.png")
     im.save(p, optimize=True)
     print("  ->", p)
@@ -299,6 +417,9 @@ if __name__ == "__main__":
     draw_list()
     draw_single()
     draw_menu()
+    draw_news()
+    draw_radio()
+    draw_info()
     draw_statusbar_zoom()
     draw_web()
     draw_overview()
