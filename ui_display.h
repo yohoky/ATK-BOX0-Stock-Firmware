@@ -75,6 +75,8 @@ enum MenuIdx {
   MENU_POWER,       // 关机
   MENU_MODE,        // v7.2 工作模式: 股票 / 收音机
   MENU_NEWS,        // v7.2 实时快讯(三连 M 的兜底入口)
+  MENU_ALERT_REP,   // v7.3 提醒间隔: 5/15/30/60/120分钟/一天
+  MENU_TICKER,      // v7.3 主界面底部滚动快讯条 开/关
   MENU_N
 };
 

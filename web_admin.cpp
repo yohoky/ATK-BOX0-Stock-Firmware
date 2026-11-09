@@ -6,6 +6,7 @@
 #include "wifi_mgr.h"
 #include "gyro_imu.h"
 #include "news_feed.h"
+#include "mic_knock.h"
 #include "buttons.h"
 #include "beep.h"
 #include "cfg_pins.h"
@@ -168,8 +169,11 @@ box-shadow:0 4px 16px rgba(0,0,0,.5);max-width:90%;text-align:center}
 <div class="tab on" id=t0>
   <h3>自选股（每行一个，最多 30 只）</h3>
   <textarea id=codes rows=8 spellcheck=false placeholder="600519 或 sh600519"></textarea>
-  <div class=hint>A股可直接填 6 位数字：6开头=沪、0/3开头=深、8/4开头=北交所<br>
-  指数 sh000001、深成指 sz399001　港股 rt_hk+5位　美股 gb_+代码（小写）</div>
+  <div class=hint>A股 6 位数字自动补前缀；指数 sh000001 / sz399006；港股 rt_hk+5位；美股 gb_+代码<br>
+  <b>v7.3 新增品种：</b>nf_AU0 沪金主连 / nf_AG0 沪银主连、hf_GC 纽约金 / hf_XAU 伦敦金 /
+  hf_OIL 布伦特油、gb_inx 标普500 / gb_dji 道琼斯 / gb_ixic 纳斯达克 / gb_ndx 纳指100。<br>
+  <b>标普500 请用 gb_inx（或点下方快捷按钮）：gb_spx 新浪无此代码、返回空数据</b>；
+  输入 spx / sp500 / gb_$inx 也会自动归一到 gb_inx。期货与外盘代码大小写不敏感，最多 30 只。</div>
   <div id=quick></div>
   <button class=act onclick=saveStocks()>保存自选股</button>
 </div>
@@ -220,6 +224,34 @@ box-shadow:0 4px 16px rgba(0,0,0,.5);max-width:90%;text-align:center}
     </div>
     <div id=newsstat class=hint>读取中…</div>
     <button class=act onclick=saveSet()>保存新闻与模式设置</button>
+  </div>
+
+  <h3>v7.3 新增设置</h3>
+  <div class=card>
+    <div class=row>
+      <div><label>涨跌提醒间隔（同一只股票）</label><select id=altrep>
+        <option value=5>5 分钟一次</option><option value=15>15 分钟一次</option>
+        <option value=30>30 分钟一次（默认）</option><option value=60>60 分钟一次</option>
+        <option value=120>120 分钟一次</option><option value=1440>一天一次</option></select></div>
+      <div><label>主界面底部快讯条</label><select id=tknews>
+        <option value=0>关闭</option><option value=1>开启（列表/单只让出最后一行）</option></select></div>
+    </div>
+    <div class=row>
+      <div><label>新闻页切换</label><select id=nsauto>
+        <option value=0>手动（左右键换条）</option><option value=1>自动轮播</option></select></div>
+      <div><label>自动轮播间隔（秒）</label><input id=nsautos type=number min=3 max=60 value=8></div>
+    </div>
+    <div class=row>
+      <div><label>敲击检测（M 键平替，实验）</label><select id=mick>
+        <option value=0>关闭（默认）</option><option value=1>开启（仅亮屏时生效）</option></select></div>
+      <div><label>敲击灵敏度阈值</label><input id=mict type=number min=500 max=30000 step=500 value=9000></div>
+    </div>
+    <div id=micstat class=hint>麦克风状态读取中…</div>
+    <div class=hint>提醒间隔：同一只股票在设定时间内只响一次，默认 30 分钟；选「一天一次」即回到旧版行为。
+    底部快讯条会在列表与单只大屏最下面一行滚动显示最新快讯标题。
+    敲击检测走板上 ES8311 麦克风（I2S DIN=GPIO6），只在屏幕点亮且股票模式时生效，
+    <b>属实验功能，请观察下方峰值是否有读数、敲一下盒子看是否触发</b>。</div>
+    <button class=act onclick=saveSet()>保存 v7.3 设置</button>
   </div>
 
   <h3>显示</h3>
@@ -310,6 +342,7 @@ box-shadow:0 4px 16px rgba(0,0,0,.5);max-width:90%;text-align:center}
   <label>自动关机（息屏后多久）</label>
   <select id=poff onchange="post('/api/settings',{poweroffmin:+this.value})">
     <option value=0>关闭（只熄屏，不关机）</option>
+    <option value=15>息屏后 15 分钟</option>
     <option value=30>息屏后 30 分钟</option>
     <option value=60>息屏后 1 小时</option>
     <option value=120>息屏后 2 小时</option>
@@ -336,7 +369,10 @@ box-shadow:0 4px 16px rgba(0,0,0,.5);max-width:90%;text-align:center}
   <button class=act onclick=saveWifi()>保存并连接</button>
   <div class=hint>① <b>密码留空即可连接无密码开放网络</b>。<br>
   ② 热点 <b>BOX0-Setup</b> 永远开启：连不上时手机连它即可重新配置。<br>
-  ③ 只支持 2.4GHz；5GHz 名称通常带 -5G，请选另一个。</div>
+  ③ <b>只支持 2.4GHz</b>。2.4G/5G 合一（同名双频）时扫描结果会标出 2.4G，选中后设备锁定这个 2.4G AP；
+  显示「仅5G·本设备不支持」说明路由器没广播 2.4G，需到路由器设置里打开 2.4GHz。<br>
+  ④ <b>中文 SSID 请直接点上面的扫描结果</b>：v7.3 起按路由器广播的原始字节连接，不受中文/GBK 编码往返影响；
+  手动输入也支持 UTF-8 中文（上限 32 字节）。</div>
 
   <h3>已保存的 WiFi（最多 8 组）</h3>
   <div class=card id=wplist>读取中...</div>
@@ -437,6 +473,10 @@ function paint(d){
   var ns=document.getElementById('newsstat');
   if(ns)ns.innerText='已缓存 '+(d.newsCount||0)+' 条 · 未读 '+(d.newsNew||0)+' · HTTP '+(d.newsHttp||0)+
     ' · '+(d.newsAgo===null||d.newsAgo===undefined?'尚未抓取':d.newsAgo+' 秒前更新');
+  var ms=document.getElementById('micstat');
+  if(ms)ms.innerText='麦克风 '+(d.micOn?'已开启':'已关闭')+' · RX '+(d.micRxOk?'就绪':'未建立')+
+    ' · 峰值 '+(d.micPeak||0)+' / 阈值 '+(d.mict||0)+' · 累计敲击 '+(d.micKnocks||0)+
+    '（敲一下盒子看峰值是否超过阈值）';
 }
 async function load(){
   var r=await fetch('/api/cfg',{cache:'no-store'});
@@ -465,6 +505,13 @@ async function load(){
   document.getElementById('nsref').value=CFG.nsref;
   document.getElementById('nssum').value=CFG.nssum;
   document.getElementById('nsbeep').value=CFG.nsbeep;
+  // v7.3 新设置
+  document.getElementById('altrep').value=CFG.altrep;
+  document.getElementById('tknews').value=CFG.tknews;
+  document.getElementById('nsauto').value=CFG.nsauto;
+  document.getElementById('nsautos').value=CFG.nsautos;
+  document.getElementById('mick').value=CFG.mick;
+  document.getElementById('mict').value=CFG.mict;
   putWin('f',CFG.fetchwin); putWin('a',CFG.alertwin);
   var fv=document.getElementById('fwver');if(fv)fv.innerText=CFG.version||'-';
   renderFwNotes();
@@ -543,12 +590,23 @@ async function showNews(){
   try{var r=await fetch('/api/news',{cache:'no-store'});p.innerText=JSON.stringify(await r.json(),null,2)}
   catch(e){p.innerText='读取失败：'+e}
 }
+// v7.3: 前 10 个是常见 A股/港股/美股, 之后是商品期货主连 / 外盘现货 / 国际指数
 var QK=[['上证指数','sh000001'],['深证成指','sz399001'],['创业板指','sz399006'],
 ['贵州茅台','sh600519'],['宁德时代','sz300750'],['比亚迪','sz002594'],
-['腾讯控股','rt_hk00700'],['阿里巴巴','rt_hk09988'],['苹果','gb_aapl'],['英伟达','gb_nvda']];
+['腾讯控股','rt_hk00700'],['阿里巴巴','rt_hk09988'],['苹果','gb_aapl'],['英伟达','gb_nvda'],
+['沪金主连','nf_AU0'],['沪银主连','nf_AG0'],['沪铜主连','nf_CU0'],['螺纹主连','nf_RB0'],['原油主连','nf_SC0'],
+['纽约金','hf_GC'],['伦敦金','hf_XAU'],['伦敦银','hf_XAG'],['布伦特油','hf_OIL'],['纽约油','hf_CL'],
+['纽约银','hf_SI'],['纽约铜','hf_HG'],['天然气','hf_NG'],
+['道琼斯','gb_dji'],['纳斯达克','gb_ixic'],['标普500','gb_inx'],['纳指100','gb_ndx'],
+['日经225','int_nikkei'],['恒生','int_hangseng'],['富时100','int_ftse'],
+['特斯拉','gb_tsla'],['微软','gb_msft'],['阿里巴巴ADR','gb_baba']];
 function buildQuick(){
-  var h='<div class=hint>快速添加：</div>';
-  QK.forEach(function(q){h+='<span class=chip onclick="addCode(\''+q[1]+'\')">'+q[0]+'</span>'});
+  var h='<div class=hint>快速添加（点击即自动保存）：</div><div>';
+  for(var i=0;i<QK.length;i++){
+    if(i==10)h+='</div><div class=hint style="margin-top:8px">v7.3 商品期货主连 / 外盘 / 指数：</div><div>';
+    h+='<span class=chip onclick="addCode(\''+QK[i][1]+'\')">'+QK[i][0]+'</span>';
+  }
+  h+='</div>';
   document.getElementById('quick').innerHTML=h;
 }
 function addCode(c){
@@ -557,6 +615,7 @@ function addCode(c){
   if(arr.indexOf(c)>=0){msg('已在列表中',false);return}
   if(arr.length>=30){msg('最多 30 只，请先删掉一只',false);return}
   arr.push(c);t.value=arr.join('\n');
+  saveStocks();          // v7.3: 点一下就直接写入设备并刷新行情, 不用再按保存
 }
 async function saveStocks(){
   var v=document.getElementById('codes').value.split('\n')
@@ -579,6 +638,12 @@ function saveSet(){
          nsref:+document.getElementById('nsref').value,
          nssum:+document.getElementById('nssum').value,
          nsbeep:+document.getElementById('nsbeep').value,
+         altrep:+document.getElementById('altrep').value,
+         tknews:+document.getElementById('tknews').value,
+         nsauto:+document.getElementById('nsauto').value,
+         nsautos:+document.getElementById('nsautos').value,
+         mick:+document.getElementById('mick').value,
+         mict:+document.getElementById('mict').value,
          fetchwin:getWin('f'),
          alertwin:getWin('a')};
   var per=[],els=document.querySelectorAll('[data-per]');
@@ -612,23 +677,33 @@ async function doScan(){
     var h='';
     for(var i=0;i<SCAN.length;i++){
       var lock=SCAN[i].e==0?' 开放(无密码)':' 加密';
-      h+='<div class=ap onclick="pick('+i+')">'+esc(SCAN[i].s)+lock+
+      var band=(SCAN[i].c>14)?' <span style="color:#c0392b">仅5G·本设备不支持</span>':' 2.4G';
+      h+='<div class=ap onclick="pick('+i+')">'+esc(SCAN[i].s)+lock+band+
          '<span>'+SCAN[i].r+'dBm</span></div>';
     }
     document.getElementById('scanbox').innerHTML=h;
   },600);
 }
+var PICKED=null;   // v7.3: 记住扫描结果里的原始字节 hex / BSSID / 信道
 function pick(i){
-  document.getElementById('ssid').value=SCAN[i].s;
-  var open=SCAN[i].e==0;
+  PICKED=SCAN[i];
+  document.getElementById('ssid').value=PICKED.s;
+  var open=PICKED.e==0;
   if(open)document.getElementById('wpass').value='';  // 开放网络: 清空密码
-  msg(open?'已选开放网络(无需密码)：'+SCAN[i].s:'已选：'+SCAN[i].s);
+  var band=(PICKED.c>14)?'（只有 5GHz，本设备不支持）':'（2.4GHz）';
+  msg((open?'已选开放网络(无需密码)：':'已选：')+PICKED.s+band);
   document.getElementById('wpass').focus();
 }
 async function saveWifi(){
   var s=document.getElementById('ssid').value.trim();
   if(!s){msg('请填写或选择 WiFi 名称',false);return}
-  var d=await post('/api/wifi',{ssid:s,pass:document.getElementById('wpass').value});
+  var o={ssid:s,pass:document.getElementById('wpass').value};
+  // v7.3: 从扫描结果选中的网络, 用原始字节 hex + BSSID/信道提交。
+  //   中文(尤其 GBK 编码) SSID 不再经 UTF-8 JSON 往返而损坏; 双频合一锁定 2.4G。
+  if(PICKED && PICKED.s===s && PICKED.x){
+    o.ssidhex=PICKED.x;o.bssid=PICKED.b||'';o.ch=PICKED.c||0;
+  }
+  var d=await post('/api/wifi',o);
   if(d.ok){setTimeout(poll,1500);setTimeout(poll,5000);setTimeout(poll,10000)}
 }
 function doPowerOff(){
@@ -755,11 +830,57 @@ static String normalizeCode(const String& c) {
       return c;   // 其它开头(2 等)无法判断, 保持原样交给 validCode 报错
     }
   }
+  // v7.3: 新浪的期货/外盘品种代码区分大小写(nf_au0、hf_gc 实测返回空),
+  //   而网页保存时会统一 toLowerCase(), 这里把前缀之后的品种代码还原成大写。
+  if (c.startsWith("nf_") || c.startsWith("hf_")) {
+    String u = c.substring(3);
+    u.toUpperCase();
+    return c.substring(0, 3) + u;
+  }
+  // v7.3: 标普500 等美股指数的新浪代码不是 gb_spx(实测 hq_str_gb_spx 返回空),
+  //   正确写法是 gb_inx / gb_dji / gb_ixic / gb_ndx; gb_$inx 等带 $ 的旧写法也有效,
+  //   但 $ 在部分浏览器/表单里易被转义, 统一归一化成不带 $ 的别名。
+  if (c == "gb_spx" || c == "gb_sp500" || c == "spx" || c == "sp500" || c == "inx")
+    return "gb_inx";   // 标普500
+  if (c == "dji")   return "gb_dji";
+  if (c == "ixic")  return "gb_ixic";
+  if (c == "ndx")   return "gb_ndx";
+  if (c == "gb_$inx")  return "gb_inx";
+  if (c == "gb_$dji")  return "gb_dji";
+  if (c == "gb_$ixic") return "gb_ixic";
+  if (c == "gb_$ndx")  return "gb_ndx";
   return c;
 }
 
+// ---- v7.3: 原始字节 <-> hex, 用于中文/GBK SSID 无损往返 ----
+static String toHex(const String& s) {
+  static const char* H = "0123456789abcdef";
+  String o; o.reserve(s.length() * 2);
+  for (size_t i = 0; i < s.length(); i++) {
+    uint8_t c = (uint8_t)s[i];
+    o += H[c >> 4]; o += H[c & 15];
+  }
+  return o;
+}
+static int hexNib(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+static int fromHex(const char* h, uint8_t* out, int maxN) {
+  int n = 0;
+  while (h && h[0] && h[1] && n < maxN) {
+    int a = hexNib(h[0]), b = hexNib(h[1]);
+    if (a < 0 || b < 0) break;
+    out[n++] = (uint8_t)((a << 4) | b);
+    h += 2;
+  }
+  return n;
+}
+
 static bool validCode(const String& c) {
-  if (c.length() < 5 || c.length() > 12) return false;
+  if (c.length() < 5 || c.length() > STK_CODE_LEN - 1) return false;
   if ((c.startsWith("sh") || c.startsWith("sz") || c.startsWith("bj")) && c.length() == 8) {
     for (int i = 2; i < 8; i++) if (!isDigit(c[i])) return false;
     return true;
@@ -771,8 +892,19 @@ static bool validCode(const String& c) {
   if (c.startsWith("gb_") && c.length() >= 6) {
     for (int i = 3; i < (int)c.length(); i++) {
       char ch = c[i];
-      if (!isalnum(ch) && ch != '.') return false;
+      if (!isalnum((unsigned char)ch) && ch != '.' && ch != '$') return false;  // gb_$dji 美股指数
     }
+    return true;
+  }
+  // v7.3: 国际指数 / 国内商品主连 / 外盘期货现货
+  if (c.startsWith("int_") && c.length() >= 6) {
+    for (int i = 4; i < (int)c.length(); i++)
+      if (!isalnum((unsigned char)c[i]) && c[i] != '_') return false;
+    return true;
+  }
+  if ((c.startsWith("nf_") || c.startsWith("hf_")) && c.length() >= 5) {
+    for (int i = 3; i < (int)c.length(); i++)
+      if (!isalnum((unsigned char)c[i])) return false;
     return true;
   }
   return false;
@@ -875,6 +1007,17 @@ static void handleCfg(AsyncWebServerRequest* r) {
   j["nsref"]   = g_newsRefSec;
   j["nssum"]   = g_newsSummary;
   j["nsbeep"]  = g_newsBeep;
+  // ---- v7.3 新增配置 ----
+  j["altrep"]  = g_alertRepeatMin;
+  j["tknews"]  = g_tickerNews;
+  j["nsauto"]  = g_newsAuto;
+  j["nsautos"] = g_newsAutoSec;
+  j["mick"]    = g_micKnock;
+  j["mict"]    = g_micThreshold;
+  j["micOn"]   = g_micKnock ? true : false;
+  j["micRxOk"] = micRxOk();
+  j["micPeak"] = micPeak();
+  j["micKnocks"] = micKnockCount();
   j["fwNotes"] = FW_NOTES;
   JsonArray hist = j["fwHistory"].to<JsonArray>();
   for (int i = 0; i < FW_HISTORY_N; i++) {
@@ -936,6 +1079,28 @@ static void handleDiag(AsyncWebServerRequest* r) {
   j["resetReason"] = (int)esp_reset_reason();
   j["radioStage"] = radioStage();   // RTC_NOINIT 标记, 重启后仍能看到崩在哪一步
   j["i2sOwner"] = beepAudioOwnsI2S() ? "beep" : "radio";
+  // v7.3 敲击检测自检
+  j["micOn"]     = (int)g_micKnock;
+  j["micRxOk"]   = micRxOk();
+  j["micPeak"]   = micPeak();
+  j["micKnocks"] = micKnockCount();
+  j["micTh"]     = g_micThreshold;
+  j["tickerNews"] = (int)g_tickerNews;
+  j["alertRepeatMin"] = g_alertRepeatMin;
+  // v7.3 同时段放量基准诊断(「放」= 今日此刻 - 前一交易日同时刻, 单位亿元)
+  {
+    char pday[11] = ""; int pok = 0; double pamt = 0;
+    stockPrevAmtInfo(pday, sizeof(pday), &pok, &pamt);
+    j["prevAmtDay"]  = pday;
+    j["prevAmtOk"]   = pok;
+    j["prevAmtBase"] = pamt / 1e8;          // 首只基准交易日全天成交额, >0 说明解析成功
+    if (quotesLock()) {
+      j["amtNow"]  = (double)g_quotes[0].amount / 1e8;
+      j["amtPrev"] = (double)g_quotes[0].prevAmount / 1e8;
+      j["amtDiff"] = (double)(g_quotes[0].amount - g_quotes[0].prevAmount) / 1e8;
+      quotesUnlock();
+    }
+  }
   j["radioActive"] = radioActive();
   j["radioState"] = (int)g_radioState;
   j["radioBitrate"] = g_radioBitrate;
@@ -1205,6 +1370,28 @@ static void handleSettings(AsyncWebServerRequest* r, String& body) {
   if (!doc["newson"].isNull())  g_newsOn      = ((int)doc["newson"]) ? 1 : 0;
   if (!doc["nssum"].isNull())   g_newsSummary = ((int)doc["nssum"])  ? 1 : 0;
   if (!doc["nsbeep"].isNull())  g_newsBeep    = ((int)doc["nsbeep"]) ? 1 : 0;
+  // ---- v7.3 新增设置 ----
+  if (!doc["altrep"].isNull()) {
+    uint16_t v = (uint16_t)doc["altrep"];
+    bool ok = false;
+    for (int i = 0; i < ALERT_REPEAT_N; i++) if (ALERT_REPEAT_STEPS[i] == v) ok = true;
+    if (ok) g_alertRepeatMin = v;
+  }
+  if (!doc["tknews"].isNull())  g_tickerNews = ((int)doc["tknews"]) ? 1 : 0;
+  if (!doc["nsauto"].isNull())  g_newsAuto   = ((int)doc["nsauto"]) ? 1 : 0;
+  if (!doc["nsautos"].isNull()) {
+    int v = (int)doc["nsautos"];
+    if (v >= 3 && v <= 60) g_newsAutoSec = (uint8_t)v;
+  }
+  if (!doc["mick"].isNull()) {
+    uint8_t v = ((int)doc["mick"]) ? 1 : 0;
+    if (v != g_micKnock) micKnockResetRx();
+    g_micKnock = v;
+  }
+  if (!doc["mict"].isNull()) {
+    int v = (int)doc["mict"];
+    if (v >= 500 && v <= 30000) g_micThreshold = (uint16_t)v;
+  }
   if (!doc["nsref"].isNull())   g_newsRefSec  = (uint16_t)constrain((int)doc["nsref"], 30, 3600);
   if (!doc["alton"].isNull()) g_alertOn = ((int)doc["alton"]) ? 1 : 0;
   if (!doc["altpct"].isNull()) {
@@ -1346,12 +1533,40 @@ static void handleBeep(AsyncWebServerRequest* r, String& body) {
   sendOk(r, true);
 }
 
-static bool applyWifi(const char* ssid, const char* pass) {
-  if (!ssid || !strlen(ssid) || strlen(ssid) > 32) return false;
+// v7.3: ssidHex 优先(来自扫描结果的原始字节), 完全绕开字符编码往返;
+//   手输时按 UTF-8 字符边界安全截断到 802.11 上限 32 字节, 不切出半个汉字。
+static bool applyWifi(const char* ssidRaw, const char* pass,
+                      const char* ssidHex, const uint8_t* bssid, uint8_t ch) {
+  char ssid[33] = "";
+  if (ssidHex && *ssidHex) {
+    int n = fromHex(ssidHex, (uint8_t*)ssid, 32);
+    ssid[n] = 0;
+  } else if (ssidRaw) {
+    int n = 0, L = strlen(ssidRaw);
+    while (n < 32 && n < L) {
+      uint8_t c = (uint8_t)ssidRaw[n];
+      int step = (c >= 0xF0) ? 4 : (c >= 0xE0) ? 3 : (c >= 0xC0) ? 2 : 1;
+      if (n + step > 32) break;
+      memcpy(ssid + n, ssidRaw + n, step);
+      n += step;
+    }
+    ssid[n] = 0;
+  }
+  if (!*ssid) return false;
   strncpy(g_wifiSsid, ssid, 32); g_wifiSsid[32] = 0;
   strncpy(g_wifiPass, pass ? pass : "", 64); g_wifiPass[64] = 0;
+  if (bssid && ch > 0 && ch <= 14) {
+    memcpy(g_wifiBssid, bssid, 6);
+    g_wifiChannel = ch;
+    g_wifiHasBssid = true;
+  } else {
+    memset(g_wifiBssid, 0, 6);
+    g_wifiChannel = 0;
+    g_wifiHasBssid = false;
+  }
   cfgSaveSettings();
-  cfgWifiAdd(g_wifiSsid, g_wifiPass);   // 记住这组凭据(空密码=开放网络), 之后换地点自动连
+  cfgWifiAdd(g_wifiSsid, g_wifiPass,
+             g_wifiHasBssid ? g_wifiBssid : nullptr, g_wifiChannel);
   wifiApplyCreds();          // 立即热切换, 不重启(本板重启会掉电源锁存)
   uiInvalidate();
   uiTouch();
@@ -1363,7 +1578,13 @@ static void handleWifi(AsyncWebServerRequest* r, String& body) {
   if (deserializeJson(doc, body)) { sendOk(r, false, "JSON解析失败"); return; }
   const char* ssid = doc["ssid"] | "";
   const char* pass = doc["pass"] | "";
-  if (!applyWifi(ssid, pass)) { sendOk(r, false, "WiFi 名称无效(1-32 字符)"); return; }
+  const char* hex  = doc["ssidhex"] | "";
+  uint8_t mac[6] = {0};
+  int macN = fromHex(doc["bssid"] | "", mac, 6);
+  int ch = (int)(doc["ch"] | 0);
+  if (!applyWifi(ssid, pass, hex, macN == 6 ? mac : nullptr, (uint8_t)ch)) {
+    sendOk(r, false, "WiFi 名称无效(1-32 字节)"); return;
+  }
   sendOk(r, true);
 }
 
@@ -1419,20 +1640,26 @@ void webLoopHandler() {
   // WiFi 扫描放在这里(主循环), 不占用 async_tcp 任务, 否则页面会转圈
   if (s_scanReq) {
     s_scanReq = false;
-    String ssid[20];
-    int rssi[20], enc[20];
-    int n = wifiScan(ssid, rssi, enc, 20);
+    String ssid[20], bssidHex[20];
+    int rssi[20], enc[20], ch[20];
+    int n = wifiScan(ssid, rssi, enc, 20, bssidHex, ch);
     String err, list;
     if (n < 0) {
-      // 已连接状态也允许扫描(可随时换 WiFi), 只有真的失败才报错
       err  = "扫描失败,请重试";
       list = "[]";
     } else {
       list = "[";
       for (int i = 0; i < n; i++) {
         if (i) list += ',';
-        list += "{\"s\":\"" + jsonEsc(ssid[i]) + "\",\"r\":" + String(rssi[i]) +
-                ",\"e\":" + String(enc[i]) + "}";
+        // v7.3: 国内路由器中文 SSID 常见 GBK 编码, 直接塞进 JSON 会被浏览器
+        //   替换成 U+FFFD, 用户点选后 POST 回来的字节就对不上了 -> 连不上。
+        //   显示名: 非法 UTF-8 时按 GBK 转 UTF-8; 连接名: 用 x 传原始字节 hex。
+        String shown = ssid[i];
+        if (!utf8Valid((const uint8_t*)shown.c_str(), shown.length()))
+          shown = GBKtoUTF8((const uint8_t*)ssid[i].c_str(), ssid[i].length());
+        list += "{\"s\":\"" + jsonEsc(shown) + "\",\"x\":\"" + toHex(ssid[i]) +
+                "\",\"b\":\"" + bssidHex[i] + "\",\"c\":" + String(ch[i]) +
+                ",\"r\":" + String(rssi[i]) + ",\"e\":" + String(enc[i]) + "}";
       }
       list += "]";
     }
@@ -1515,7 +1742,7 @@ void webBegin() {
   server.on("/api/wifi", HTTP_GET, [](AsyncWebServerRequest* r) {
     if (!isAuthedOrPw(r)) { r->send(401); return; }
     if (r->hasParam("ssid")) {
-      bool ok = applyWifi(qs(r, "ssid").c_str(), qs(r, "pass").c_str());
+      bool ok = applyWifi(qs(r, "ssid").c_str(), qs(r, "pass").c_str(), nullptr, nullptr, 0);
       Serial.printf("[Web] 地址栏配网 ok=%d ssid=%s\n", ok, g_wifiSsid);
     }
     AsyncJsonResponse* resp = new AsyncJsonResponse();

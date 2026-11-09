@@ -336,12 +336,26 @@ void radioLoopHandler() {
   if (s_pendingToggle) {
     s_pendingToggle = false;
     if (g_radioState == RADIO_PLAYING || g_radioState == RADIO_CONNECTING) {
-      s_audio->pauseResume();
-      g_radioState = (g_radioState == RADIO_PLAYING) ? RADIO_PAUSED : RADIO_PLAYING;
-      g_radioHasAudio = (g_radioState == RADIO_PLAYING);
-      digitalWrite(PIN_SPK_EN, g_radioState == RADIO_PAUSED ? LOW : HIGH);
+      // v7.3: 暂停用 stopSong() 而不是 Audio::pauseResume()。网络流的 pauseResume
+      //   只是暂停解码, HTTP 流仍在缓冲, 停久了会被服务器断开/撑爆缓冲, 恢复时没声音。
+      //   直接断流最干净; 恢复时重新 connect(用户实测「停止再播放」一直可靠)。
+      s_audio->stopSong();
+      digitalWrite(PIN_SPK_EN, LOW);
+      g_radioState = RADIO_PAUSED;
+      g_radioHasAudio = false;
+      g_radioBitrate = 0;
+      s_userStopped = false;
+      s_retryAt = 0;
+      s_retryCnt = 0;
+      Serial.println("[Radio] pause");
       uiFlashRadioLine();
+    } else if (g_radioState == RADIO_PAUSED) {
+      // ★ v7.3 修复: 旧版 pendingToggle 完全没有 PAUSED 分支, 暂停后再按 M
+      //   标志被清掉却什么都不做 -> 永远无法恢复(用户报「M暂停再按M恢复没用」)。
+      doConnect(g_curStation);
+      Serial.println("[Radio] resume");
     } else if (g_radioState == RADIO_IDLE || g_radioState == RADIO_ERROR) {
+      s_userStopped = false;
       doConnect(g_curStation);
     }
   }

@@ -46,6 +46,7 @@
 #include "wifi_mgr.h"
 #include "gyro_imu.h"
 #include "beep.h"
+#include "mic_knock.h"
 
 // 菜单项索引见 ui_display.h 的 MenuIdx (两个文件共用, 不再各写一份)
 
@@ -383,6 +384,27 @@ static void handleAdj(BtnEvent e) {
     return;
   }
 
+  // v7.3: 提醒节流档位(5/15/30/60/120分钟/一天同一只股票只提醒一次)
+  if (g_menuSel == MENU_ALERT_REP) {
+    int cur = 2;
+    for (int i = 0; i < ALERT_REPEAT_N; i++)
+      if (ALERT_REPEAT_STEPS[i] == g_alertRepeatMin) { cur = i; break; }
+    cur = constrain(cur + (up ? 1 : -1), 0, ALERT_REPEAT_N - 1);
+    g_alertRepeatMin = ALERT_REPEAT_STEPS[cur];
+    cfgSaveSettings();
+    toast(alertRepeatName(g_alertRepeatMin), 0x05BF);
+    uiInvalidate();
+    return;
+  }
+  // v7.3: 主界面底部滚动快讯条(列表/单只大屏都留一行)
+  if (g_menuSel == MENU_TICKER) {
+    g_tickerNews = g_tickerNews ? 0 : 1;
+    cfgSaveSettings();
+    toast(g_tickerNews ? "底部快讯条 开" : "底部快讯条 关", 0x05BF);
+    uiInvalidate();
+    return;
+  }
+
   if (g_menuSel == MENU_BRIGHT) {
     int v = (int)g_bright + (up ? 10 : -10);
     if (v < 10) v = 10;
@@ -541,6 +563,7 @@ void setup() {
 }
 
 void loop() {
+  micKnockLoop();          // v7.3 敲击检测(默认关; 仅亮屏 + 股票模式时采样)
   // v7.2: 网页(async_tcp 任务)只置标志, 模式切换(含 I2S 交接/Audio 创建)
   // 一律在主 loop 执行, 避免在异步网络任务里操作 I2S 与动态分配大对象。
   if (g_pendingMode >= 0) {
@@ -595,6 +618,22 @@ void loop() {
     e = BTN_NONE;
   }
 
+  // v7.3: 新闻页自动切换(网页设置里可选手动/自动, 默认手动)。
+  //   任何手动按键都重置计时, 不会刚翻完就被自动跳走。
+  static uint32_t s_newsAutoAt = 0;
+  if (g_scene == SCENE_NEWS && g_newsAuto && g_nNews > 0) {
+    if (!s_newsAutoAt) s_newsAutoAt = millis();
+    if (e != BTN_NONE) s_newsAutoAt = millis();
+    else if (millis() - s_newsAutoAt > (uint32_t)g_newsAutoSec * 1000UL) {
+      s_newsAutoAt = millis();
+      g_newsSel = (g_newsSel + 1) % g_nNews;
+      newsSelect(g_newsSel);
+      uiInvalidate();
+    }
+  } else {
+    s_newsAutoAt = 0;
+  }
+
   // ★ 显式返回: 任何子页面按 M 长按 = 立刻回主界面, 不用等 8 秒超时
   if (g_scene != SCENE_MAIN && e == BTN_M_LONG) {
     g_scene = SCENE_MAIN;
@@ -616,8 +655,11 @@ void loop() {
 
   // 覆盖场景无操作自动回主界面(菜单不会把机器"卡"在某个页面)
   if (g_scene != SCENE_MAIN && e != BTN_NONE) s_menuAt = millis();
-  uint32_t idleMs = (g_scene == SCENE_NEWS) ? 20000u : MENU_IDLE_MS;
-  if (g_scene != SCENE_MAIN && millis() - s_menuAt > idleMs) {
+  // v7.3: 新闻页 / 收音机页是"停留型"页面, 取消自动返回。
+  //   旧版新闻 20 秒、收音机 8 秒就会被弹回主界面(收音机更糟: 声音还在放,
+  //   画面却变成股票页)。现在只有菜单/设置/确认/设备信息保留 8 秒兜底。
+  bool sticky = (g_scene == SCENE_NEWS || g_scene == SCENE_RADIO);
+  if (!sticky && g_scene != SCENE_MAIN && millis() - s_menuAt > MENU_IDLE_MS) {
     g_scene = SCENE_MAIN;
     uiInvalidate();
   }
@@ -676,17 +718,14 @@ void loop() {
   //       0=跟随全局 / >0=独立阈值 / <0=该股禁用
   //   * 去重位按股票单独维护: 改全局阈值只影响"跟随全局"的股票,
   //     改某只股票的阈值只清它自己的位, 互不影响
-  //   * 每只股票每天最多提醒一次(跨天自动清零), 不再"响一次就整天不响"
+  //   * v7.3: 原来"每只股票每天只提醒一次"太稀疏, 改成按可配间隔节流
+  //     (5/15/30/60/120 分钟 / 一天), 默认 30 分钟; 每只股票独立计时
   static uint32_t s_alertAt = 0;
-  static int      s_alertDay = -1;
-  static uint32_t s_alertMask = 0;      // 30 只用 uint32 位图足够
+  static uint32_t s_alertLastAt[MAX_STOCKS];   // 0 = 从未提醒过
   static float    s_alertLastVal[MAX_STOCKS];
   static bool     s_alertValInit = false;
   if (millis() - s_alertAt > 3000) {
     s_alertAt = millis();
-    struct tm tt; int day = -1;
-    if (getLocalTime(&tt, 50)) day = tt.tm_yday;
-    if (day != s_alertDay) { s_alertDay = day; s_alertMask = 0; }
 
     if (!s_alertValInit) {
       for (int i = 0; i < MAX_STOCKS; i++) s_alertLastVal[i] = alertThresholdFor(i);
@@ -696,7 +735,7 @@ void loop() {
       float v = alertThresholdFor(i);
       if (s_alertLastVal[i] != v) {
         s_alertLastVal[i] = v;
-        s_alertMask &= ~(1UL << i);   // 只重置这一只, 其它股票不受影响
+        s_alertLastAt[i] = 0;        // 只重置这一只, 其它股票不受影响
       }
     }
 
@@ -709,9 +748,10 @@ void loop() {
         const Quote& q = g_quotes[i];
         if (q.valid && q.chgpct != 0 &&
             (q.chgpct >= th || q.chgpct <= -th) &&
-            !(s_alertMask & (1UL << i))) {
+            (s_alertLastAt[i] == 0 ||
+             millis() - s_alertLastAt[i] >= (uint32_t)g_alertRepeatMin * 60000UL)) {
           hitIdx = i; hitTh = th;
-          s_alertMask |= (1UL << i);
+          s_alertLastAt[i] = millis();
           break;
         }
       }

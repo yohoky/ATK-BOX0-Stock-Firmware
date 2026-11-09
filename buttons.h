@@ -23,6 +23,8 @@ void     btnTaskStart();   // 启动 5ms 采样任务(core1, 高优先级)
 BtnEvent btnPoll();        // 主循环: 取一个事件(无事件返回 BTN_NONE)
 // 丢弃队列 + 抑制当前按住的键(熄屏唤醒后用: 否则长按唤屏会立刻开始连调音量)
 void     btnFlush();
+// v7.3: 非物理按键源(麦克风敲击等)注入一个事件, 走与真实按键完全相同的分发链路
+void     btnInject(BtnEvent e);
 // 诊断用: 返回三个键当前原始电平(L=0x01 M=0x02 R=0x04, 按下位=1)
 uint8_t  btnRawState();
 // 诊断: 指定键(0=左 1=中 2=右)开机以来电平变化次数。

@@ -129,7 +129,7 @@ static volatile uint32_t s_toastUntil = 0;
 static const char* MENU_NAME[MENU_N] = {
   "显示模式", "轮播间隔", "刷新间隔", "涨跌提醒", "自动关机", "亮度",
   "音量", "自动熄屏", "测试提示音", "设备信息", "恢复出厂", "关机",
-  "工作模式", "实时新闻"
+  "工作模式", "实时新闻", "提醒间隔", "底部快讯"
 };
 
 // GB2312 字库里有"涨"没有"跌"? 有的(GB2312 一级字库). 
@@ -174,6 +174,8 @@ static const char* menuValue(int i, char* buf, int n) {
       return buf;
     case MENU_MODE:  return g_appMode == APP_RADIO ? "收音机" : "股票";
     case MENU_NEWS:  snprintf(buf, n, "%u条", (unsigned)g_nNews); return buf;
+    case MENU_ALERT_REP: return alertRepeatName(g_alertRepeatMin);
+    case MENU_TICKER:    return g_tickerNews ? "开" : "关";
     default: buf[0] = 0; return buf;
   }
 }
@@ -410,11 +412,14 @@ static void drawStockList() {
   if (page < 0) page = 0;
   int first = page * UI_LIST_ROWS;
 
+  // v7.3: 开底部快讯条时最下面让出一行, 避免滚动条盖住第 6 只股票
+  bool ticker = g_tickerNews && g_newsOn && g_nNews > 0;
+  int rows = ticker ? UI_LIST_ROWS - 1 : UI_LIST_ROWS;
   for (int r = 0; r < UI_LIST_ROWS; r++) {
     int i = first + r;
     int y = UI_LIST_Y0 + r * UI_LIST_ROW_H;
-    if (i < g_nStock) drawStockRow(i, y);
-    else              clearStockRow(y);       // 翻到最后一页时清掉上一页的残留
+    if (r < rows && i < g_nStock) drawStockRow(i, y);
+    else                          clearStockRow(y);
   }
   // 列表区顶部 1px 缝隙(19..20) + 底部到屏幕底的缝隙(237..239)
   if (s_rowSpr && !s_sprOk) {
@@ -425,7 +430,9 @@ static void drawStockList() {
 
 // ---------------- 单只大屏 ----------------
 static void drawStockMain(int idx) {
-  disp().fillRect(0, 19, 240, 220, C_BG);   // 19..238 (底部不再有新闻条, 主区占满)
+  // v7.3: 开底部快讯条时主区只画到 215, 最下面一行(216..239)让给滚动新闻
+  bool ticker = g_tickerNews && g_newsOn && g_nNews > 0;
+  disp().fillRect(0, 19, 240, ticker ? 197 : 221, C_BG);
   if (g_nStock == 0) {
     drawCN(disp(), 12, 60, "自选股为空", C_FLAT);
     drawCN(disp(), 12, 82, "请网页配置代码", C_FLAT);
@@ -481,29 +488,26 @@ static void drawStockMain(int idx) {
   snprintf(b, sizeof(b), "低 %.2f  昨收 %.2f", v.lo, v.prev);
   drawCN(disp(), 8, 174, b, C_FG, C_BG);
 
-  // 成交额 + 同时段放量对比 (只写"放"字, +正放量 -缩量, 单位亿)
-  if (v.amt > 0) {
+  // v7.3「放」: 今日此刻累计成交额 - 前一交易日同一时刻累计额, 单位亿元。
+  //   + 放量(红) / - 缩量(绿) / -- 无基准(非沪深品种、基准表未建好)。
+  //   分段着色, 让「放」在大屏上一眼可见; 开底部新闻条时整行上移让出空间。
+  {
+    int y = ticker ? 190 : 194;
     char amt[32];
-    snprintf(amt, sizeof(amt), "%.2f亿", v.amt / 1e8);
-    // 放量差值 = 今日成交额 - 昨日同时刻成交额(单位亿)
-    char volSign = ' ';
-    double diffE = 0;
-    if (v.prevAmount > 0) {
-      diffE = (v.amt - v.prevAmount) / 1e8;
-      if (diffE >= 0.01)      volSign = '+';   // 放量
-      else if (diffE <= -0.01) volSign = '-';  // 缩量
-      else                     volSign = ' ';  // 基本持平
-    }
-    uint16_t vc = (volSign == '+') ? C_UP : (volSign == '-' ? C_DOWN : C_FLAT);
-    char line[48];
-    if (volSign != ' ') {
-      snprintf(line, sizeof(line), "额 %s  放%+.2f亿", amt, diffE);
+    if (v.amt > 0) snprintf(amt, sizeof(amt), "额 %.2f亿", v.amt / 1e8);
+    else           strcpy(amt, "额 --");
+    drawCN(disp(), 8, y, amt, C_FG, C_BG, true);
+
+    int x = 8 + cnTextWidth(amt) + 6;
+    if (v.amt > 0 && v.prevAmount > 0) {
+      double diffE = (v.amt - v.prevAmount) / 1e8;   // 亿元, 正=放量 负=缩量
+      char fang[32];
+      snprintf(fang, sizeof(fang), "放%+.2f亿", diffE);
+      uint16_t fc = (diffE >= 0.005) ? C_UP : (diffE <= -0.005 ? C_DOWN : C_FLAT);
+      drawCN(disp(), x, y, fang, fc, C_BG, true);
     } else {
-      snprintf(line, sizeof(line), "额 %s", amt);
+      drawCN(disp(), x, y, "放 --", C_FLAT, C_BG, true);
     }
-    drawCN(disp(), 8, 196, line, C_FG, C_BG);
-  } else {
-    drawCN(disp(), 8, 196, "额 --", C_FLAT, C_BG);
   }
 }
 
@@ -634,8 +638,43 @@ static int drawCNWrap(int x, int y, const char* s, int maxW,
   return lines;
 }
 
+// v7.3 主界面底部滚动快讯条: 列表与单只大屏都让出最下面一行, 显示最新一条快讯标题。
+// 用 g_tickerNews 控制(菜单第 16 项 / 网页设置页), 关掉时行为与 v7.2 完全一致。
+static int      s_tickerIdx   = 0;
+static int      s_tickerPhase = 0;
+static uint32_t s_tickerAt    = 0;
+
+static void drawNewsTicker() {
+  const int Y = 216, H = 22;
+  disp().fillRect(0, Y, 240, H, C_DIM);
+  disp().fillRect(0, Y, 240, 1, C_LINE);
+  if (s_tickerIdx >= g_nNews) s_tickerIdx = 0;
+  char line[NEWS_TITLE + 16];
+  snprintf(line, sizeof(line), "%s        ", g_news[s_tickerIdx].title);
+  int span = cnTextWidth(line) + 240;
+  int off  = s_tickerPhase % (span > 0 ? span : 240);
+  // 负 x 由 LovyanGFX 自动裁剪, 形成从右向左的跑马灯
+  drawCN(disp(), 240 - off, Y + 3, line, C_ACCENT, C_DIM, true);
+}
+
+void uiTickTicker() {
+  if (!g_tickerNews || !g_newsOn || g_nNews == 0) return;
+  if (millis() - s_tickerAt < 55) return;
+  s_tickerAt = millis();
+  if (s_tickerIdx >= g_nNews) s_tickerIdx = 0;
+  char line[NEWS_TITLE + 16];
+  snprintf(line, sizeof(line), "%s        ", g_news[s_tickerIdx].title);
+  int span = cnTextWidth(line) + 240;
+  s_tickerPhase += 2;
+  if (s_tickerPhase >= span) {
+    s_tickerPhase = 0;
+    s_tickerIdx = (s_tickerIdx + 1) % g_nNews;
+  }
+}
+
 static void drawBottomBar() {
-  // 新闻条已停用: 底部只保留音量条预览(调音量时盖在列表最下一行之上)
+  if (g_tickerNews && g_newsOn && g_nNews > 0) drawNewsTicker();
+  else disp().fillRect(0, 216, 240, 24, C_BG);
   if (s_volUntil > millis()) {
     int w = g_volume * 2;
     disp().fillRect(10, 216, 200, 8, 0x2120);
@@ -797,23 +836,35 @@ static void drawNewsScene() {
   if (g_newsSel < 0) g_newsSel = 0;
   int sel = g_newsSel;
 
-  if (g_newsDetail) {                       // 全文摘要视图
-    int ln = drawCNWrap(6, 28, g_news[sel].title, 228, 18, 3, C_ACCENT);
-    int y = 28 + ln * 18 + 4;
+  if (g_newsDetail) {                       // v7.3: 铺满整屏的全文视图
+    int ln = drawCNWrap(6, 26, g_news[sel].title, 228, 18, 3, C_ACCENT);
+    int y = 26 + ln * 18 + 2;
     const char* t = g_news[sel].time;
-    char tm[12];
-    if (strlen(t) >= 16) { strncpy(tm, t + 11, 5); tm[5] = 0; }
-    else strcpy(tm, "最新");
-    drawCN(disp(), 6, y, tm, C_FLAT); y += 18;
+    char meta[64];
+    if (strlen(t) >= 16) snprintf(meta, sizeof(meta), "%.11s  第%d/%d条", t + 5, sel + 1, (int)g_nNews);
+    else                 snprintf(meta, sizeof(meta), "最新  第%d/%d条", sel + 1, (int)g_nNews);
+    drawCN(disp(), 6, y, meta, C_FLAT); y += 18;
+    disp().fillRect(0, y, 240, 1, C_LINE); y += 5;
     const char* sum = g_news[sel].summary[0] ? g_news[sel].summary : "（本条无摘要，仅标题）";
-    int left = (236 - y) / 18;
-    if (left > 10) left = 10;
-    drawCNWrap(6, y, sum, 228, 18, left, C_FG);
-    drawCN(disp(), 6, 222, "M收起  左右换条  双键返回", C_FLAT);
+    // 行高 17 一直铺到 206, 让短摘要也尽量占满; 摘要缓存已放宽到 512 字节
+    int left = (206 - y) / 17;
+    if (left > 12) left = 12;
+    if (left < 1)  left = 1;
+    drawCNWrap(6, y, sum, 228, 17, left, C_FG);
+    disp().fillRect(0, 208, 240, 1, C_LINE);
+    if (g_nNews > 1) {
+      char nx[NEWS_TITLE + 16];
+      snprintf(nx, sizeof(nx), "下一条 %s", g_news[(sel + 1) % g_nNews].title);
+      char cut[64]; cnEllipsis(cut, sizeof(cut), nx, 228);
+      drawCN(disp(), 6, 210, cut, C_DIM);
+    }
+    drawCN(disp(), 6, 226, "M收起 左右换条 双键返回", C_FLAT);
     return;
   }
 
-  const int ROWS = 5, RH = 23, Y0 = 26;    // 列表 + 下方摘要预览
+  // v7.3: 整页只显示列表(8 行), 去掉底部那块看不清的摘要预览。
+  //   想看全文按 M 进入详情, 详情页用 drawCNWrap 自动换行显示完整摘要。
+  const int ROWS = 8, RH = 24, Y0 = 26;
   int top = 0;
   if (sel >= ROWS) top = sel - ROWS + 1;
   if (top > g_nNews - ROWS) top = g_nNews - ROWS;
@@ -823,18 +874,17 @@ static void drawNewsScene() {
     if (i >= g_nNews) break;
     int y = Y0 + k * RH;
     bool on = (i == sel);
-    if (on) disp().fillRect(0, y - 2, 240, RH, C_SEL);
+    if (on) disp().fillRect(0, y - 2, 240, RH - 1, C_SEL);
     char t[96];
     cnEllipsis(t, sizeof(t), g_news[i].title, 224);
-    drawCN(disp(), 4, y + 3, t, on ? C_BG : C_FG, on ? C_SEL : C_BG, true);
+    drawCN(disp(), 4, y + 4, t, on ? C_BG : C_FG, on ? C_SEL : C_BG, true);
+    if (!on) disp().fillRect(4, y + RH - 4, 232, 1, C_LINE);
   }
-  disp().fillRect(0, 142, 240, 2, C_LINE);
-  const char* sum = g_news[sel].summary[0] ? g_news[sel].summary : g_news[sel].title;
-  drawCNWrap(6, 150, sum, 228, 17, 4, C_FLAT);
+  disp().fillRect(0, 218, 240, 2, C_LINE);
   char b[32];
   snprintf(b, sizeof(b), "%d/%d", sel + 1, (int)g_nNews);
-  drawCN(disp(), 4, 222, b, C_DIM, C_BG, true);
-  drawCN(disp(), 60, 222, "M展开全文  双击刷新", C_FLAT);
+  drawCN(disp(), 4, 223, b, C_DIM, C_BG, true);
+  drawCN(disp(), 52, 223, "M看全文 左右换条 双键返回", C_FLAT);
 }
 
 // ---------------- v7.2 收音机全屏页 ----------------
@@ -1130,6 +1180,14 @@ void uiTask(void* arg) {
         s_dirty = true;
       }
       continue;
+    }
+    // v7.3 底部快讯跑马灯: 只重画底部 24px, 不整页重绘(省 CPU)
+    if (g_tickerNews && g_newsOn && g_nNews > 0 && sc == SCENE_MAIN &&
+        now - s_tickerAt > 55 && !uiAlertActive()) {
+      uiTickTicker();
+      drawBottomBar();
+      drawToast();
+      frameCommit();
     }
     // toast 消失后重绘(否则提示会一直挂在屏上)
     if (s_toastUntil && now > s_toastUntil + 60) {

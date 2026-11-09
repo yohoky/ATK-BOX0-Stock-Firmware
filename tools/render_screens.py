@@ -136,26 +136,26 @@ def draw_list():
 
 
 def draw_single():
+    """v7.3 单只大屏: 最下面一行新增彩色「放」(较前一交易日同时刻, 单位亿元)"""
     im, scr, pad = new_screen()
     d = ImageDraw.Draw(scr)
     statusbar(d)
-    text(d, 12, 28, "上证指数", 18, FG, bold=True)
-    text(d, 12, 52, "sh000001", 9, FLAT)
-    text(d, 12, 76, "3686.17", 30, UP, bold=True)
-    text(d, 12, 118, "+77.89   +2.16%", 13, UP, bold=True)
-    line(d, 10, 145, 230, 145, LINE)
-    for i, (k, v) in enumerate([("开", "3621.40"), ("高", "3692.05"),
-                                ("低", "3618.72"), ("额", "5821亿")]):
-        x = 12 + (i % 2) * 112
-        y = 154 + (i // 2) * 32
-        text(d, x, y, k, 10, FLAT)
-        text(d, x + 22, y - 2, v, 11, FG, bold=True)
-    text(d, 12, 218, "M 短按切回列表   左右键换股", 8, FLAT)
+    text(d, 8, 22, "上证指数", 16, FG, bold=True)
+    text(d, 236, 24, "1/14", 9, FLAT, anchor="ra")
+    text(d, 8, 42, "sh000001", 9, FLAT)
+    line(d, 0, 58, 240, 58, LINE)
+    text(d, 8, 76, "3686.17", 30, UP, bold=True)
+    text(d, 8, 122, "+77.89   +2.16%", 13, UP, bold=True)
+    text(d, 8, 154, "开 3621.40   高 3692.05", 11, FG)
+    text(d, 8, 174, "低 3618.72   昨收 3608.28", 11, FG)
+    text(d, 8, 196, "额 6825.33亿", 11, FG)
+    text(d, 126, 196, "放 -901.02亿", 11, DOWN, bold=True)  # 缩量=绿, 放量用 UP=红
+    text(d, 8, 222, "M 短按切回列表   左右键换股", 8, FLAT)
     finish(im, scr, pad, "ui_single.png")
 
 
-MENU = ["显示模式", "轮播间隔", "刷新间隔", "涨跌提醒", "自动关机", "亮度", "音量",
-        "工作模式", "实时新闻"]   # v7.2: 菜单扩到 14 项, 此处展示末页附近
+MENU = ["自动熄屏", "测试提示音", "设备信息", "恢复出厂", "关机",
+        "工作模式", "实时新闻", "提醒间隔", "底部快讯"]  # v7.3: 菜单共 16 项, 展示末页附近
 
 
 def draw_menu():
@@ -164,18 +164,18 @@ def draw_menu():
     rect(d, 0, 0, W, 24, fill="#141A22")
     text(d, 8, 4, "菜单", 13, FG, bold=True)
     text(d, 232, 6, "M长按退出", 8, FLAT, anchor="ra")
-    vals = ["列表 6只/屏", "5 秒", "5 秒", "开 3.0%", "息屏后30分", "30%", "60",
-            "股票", "10条"]
+    vals = ["1 分钟", "试听", "版本说明", "恢复默认", "关机",
+            "股票", "10条", "30分钟", "关"]
     for i, nm in enumerate(MENU):
-        y = 26 + i * 23
+        y = 26 + i * 21          # v7.3: 行高收紧, 给底部提示留出间距
         if i == 7:
-            rect(d, 4, y - 3, 232, 22, fill=SEL, radius=3)
+            rect(d, 4, y - 3, 232, 20, fill=SEL, radius=3)
         c = "#0B0E14" if i == 7 else FG
         text(d, 10, y, nm, 11, c, bold=True)
         text(d, 230, y + 1, vals[i], 9, c if i == 7 else ACC, anchor="ra")
     rect(d, 237, 26, 2, 188, fill=DIM)
     rect(d, 237, 26, 2, 150, fill=ACC)
-    text(d, 6, 222, "左右选 M确定 双键返回 · 共14项", 8, FLAT)
+    text(d, 6, 222, "左右选 M确定 双键返回 · 共16项", 8, FLAT)
     finish(im, scr, pad, "ui_menu.png")
 
 
@@ -214,15 +214,15 @@ def draw_statusbar_zoom():
 
 
 def draw_web():
-    """v7.2 网页管理界面示意: 升级 / 工作模式 / 实时快讯 / 版本说明 / 接口面板"""
+    """v7.3 网页管理界面示意: OTA / 工作模式 / 快讯 / 版本说明 / 中文开放 WiFi / 放量诊断"""
     S = 2
     globals()["S"] = S
-    w, h = 520 * S, 660 * S
+    w, h = 520 * S, 700 * S
     im = Image.new("RGB", (w, h), "#0E0E0E")
     d = ImageDraw.Draw(im)
     rect(d, 10, 10, 500, 44, fill="#1B1B1B", outline="#2A2A2A", radius=10)
     text(d, 22, 20, "BOX0 股票固件 · 管理页", 13, FG, bold=True)
-    text(d, 498, 22, "v7.2", 9, FLAT, anchor="ra")
+    text(d, 498, 22, "v7.3", 9, FLAT, anchor="ra")
     tabs = ["股票", "设置", "设备", "升级"]
     for i, t in enumerate(tabs):
         x = 10 + i * 126
@@ -233,15 +233,15 @@ def draw_web():
     # 1) OTA
     rect(d, 10, 102, 500, 70, fill="#1B1B1B", radius=10)
     text(d, 22, 110, "固件升级（网页 OTA）", 12, FG, bold=True)
-    text(d, 22, 130, "当前 v7.2 · 约 12 秒写完自动重启 · 不用 USB / 下载模式 / RESET", 9, FLAT)
+    text(d, 22, 130, "当前 v7.3 · 约 12 秒写完自动重启 · 不用 USB / 下载模式 / RESET", 9, FLAT)
     rect(d, 22, 146, 300, 20, fill="#1A1A1A", outline="#333333", radius=6)
-    text(d, 28, 150, "box0_stock_v7.2.bin", 8, FLAT)
+    text(d, 28, 150, "box0_stock_v7.3.bin", 8, FLAT)
     rect(d, 330, 146, 168, 20, fill=SEL, radius=6)
     text(d, 414, 150, "上传并升级", 9, "#FFFFFF", bold=True, anchor="ma")
 
     # 2) 工作模式
     rect(d, 10, 180, 500, 76, fill="#1B1B1B", radius=10)
-    text(d, 22, 186, "工作模式（v7.2）", 12, FG, bold=True)
+    text(d, 22, 186, "工作模式", 12, FG, bold=True)
     text(d, 498, 189, "当前：股票模式", 9, ACC, anchor="ra")
     text(d, 22, 208, "开机一律股票模式 · 提示音与 MP3 自动交接 I2S", 9, FLAT)
     for i, t in enumerate(["切换收音机", "上一台", "播放/暂停", "停止"]):
@@ -251,42 +251,46 @@ def draw_web():
 
     # 3) 实时快讯
     rect(d, 10, 262, 500, 76, fill="#1B1B1B", radius=10)
-    text(d, 22, 268, "实时快讯（v7.2）", 12, FG, bold=True)
+    text(d, 22, 268, "实时快讯 · v7.3 整页标题", 12, FG, bold=True)
     text(d, 498, 271, "10 条 · 60 秒", 9, ACC, anchor="ra")
-    text(d, 22, 290, "东方财富 7×24 · 标题 + 摘要 · 按 code 去重", 9, FLAT)
-    for i, t in enumerate(["开 / 摘要 / 提示音", "60 秒", "立即抓取", "查看快讯"]):
+    text(d, 22, 290, "东方财富 7×24 · 点开看全文 · 手动/自动切换 · 底部滚动条", 9, FLAT)
+    for i, t in enumerate(["间隔 / 提示音", "60 秒", "立即抓取", "查看快讯"]):
         x = 22 + i * 122
         rect(d, x, 310, 112, 20, fill="#26303A", radius=5)
         text(d, x + 56, 314, t, 8, ACC if i >= 2 else FG, anchor="ma")
 
-    # 4) 版本更新说明
+    # 4) 版本更新说明 (v7.3)
     rect(d, 10, 344, 500, 58, fill="#1B1B1B", radius=10)
     text(d, 22, 350, "版本更新说明（设备信息页同步显示）", 11, FG, bold=True)
-    text(d, 22, 368, "v7.2 新增实时财经快讯、三连M进新闻、四连M进收音机、", 8, FLAT)
-    text(d, 22, 384, "菜单可切股票/收音机模式；提示音与MP3互斥…", 8, FLAT)
+    text(d, 22, 368, "v7.3 沪金银主连/美股指数/外盘商品一键添加、标普500 gb_inx、", 8, FLAT)
+    text(d, 22, 384, "中文开放WiFi、提醒间隔、底部快讯条、修复单只大屏「放」…", 8, FLAT)
 
-    # 5) 接口面板
+    # 5) v7.3 品种快捷添加
     rect(d, 10, 408, 500, 34, fill="#1B1B1B", radius=10)
-    text(d, 22, 414, "全部接口（点击即调用）", 10, FG, bold=True)
-    text(d, 260, 415, "/api/cfg /api/diag /api/news /api/mode …", 8, ACC)
+    text(d, 22, 414, "股票页 · 一键添加", 10, FG, bold=True)
+    text(d, 180, 415, "沪金主连  沪银主连  伦敦金  布伦特油  标普500 gb_inx", 8, ACC)
 
-    # 6) 历史 WiFi
-    text(d, 10, 448, "已保存的 WiFi（最多 8 组 · 自动漫游 · 支持无密码）", 10, FG, bold=True)
-    for i, (nm, mark) in enumerate([("Home-2.4G", "★ 当前"), ("Office-Guest", "开放"), ("Coffee-5G", "")]):
-        y = 466 + i * 34
-        rect(d, 10, y, 500, 30, fill="#1A1A1A", outline="#2D2D2D", radius=8)
-        label = ("★ " if mark.startswith("★") else "") + nm + ("  (开放)" if mark == "开放" else "")
-        text(d, 22, y + 7, label, 9, FG)
-        text(d, 498, y + 7, "连接    删除", 8, FLAT, anchor="ra")
+    # 6) 历史 WiFi (含中文开放网络)
+    text(d, 10, 450, "已保存的 WiFi（最多 8 组 · 中文/GBK 原始字节 · 锁定 2.4G BSSID）", 10, FG, bold=True)
+    for i, (nm, mark) in enumerate([("Home-2.4G", "★ 当前"), ("东安湖艺术中心", "开放"),
+                                    ("Office-Guest", "开放"), ("Coffee-5G", "仅5G")]):
+        y = 468 + i * 32
+        rect(d, 10, y, 500, 28, fill="#1A1A1A", outline="#2D2D2D", radius=8)
+        label = ("★ " if mark.startswith("★") else "") + nm
+        if mark == "开放": label += "  (开放·无密码)"
+        if mark == "仅5G": label += "  (本设备不支持)"
+        text(d, 22, y + 6, label, 9, FG)
+        text(d, 498, y + 6, "连接    删除", 8, FLAT, anchor="ra")
 
-    # 7) 诊断 JSON
-    rect(d, 10, 570, 500, 84, fill="#111111", outline="#333333", radius=8)
-    text(d, 22, 576, "GET /api/diag  ->  HTTP 200", 8, "#9CCC9C")
-    for i, ln in enumerate(['  "fw": "v7.2",  "appMode": 0,',
-                            '  "resetReason": 3,  "i2sOwner": "beep",',
-                            '  "newsCount": 10,  "newsHttp": 200,',
-                            '  "radioActive": false,  "codecOk": true']):
-        text(d, 34, 594 + i * 14, ln, 8, "#9CCC9C")
+    # 7) 诊断 JSON (v7.3 放量字段)
+    rect(d, 10, 602, 500, 90, fill="#111111", outline="#333333", radius=8)
+    text(d, 22, 608, "GET /api/diag  ->  HTTP 200", 8, "#9CCC9C")
+    for i, ln in enumerate(['  "fw": "v7.3",  "appMode": 0,',
+                            '  "prevAmtDay": "2026-11-06",  "prevAmtOk": 14,',
+                            '  "amtNow": 6825.33,  "amtPrev": 7726.35,',
+                            '  "amtDiff": -901.02,  "newsCount": 10,',
+                            '  "micOn": 0,  "resetReason": 3']):
+        text(d, 34, 624 + i * 13, ln, 8, "#9CCC9C")
     p = os.path.join(OUT, "ui_web.png")
     im.save(p, optimize=True)
     print("  ->", p)
@@ -312,29 +316,30 @@ NEWS_SUM = "【埃及列车脱轨事故已致7死112伤】当地时间11月8日�
 
 
 def draw_news():
-    """v7.2 实时快讯: 5 行标题 + 下方摘要预览"""
+    """v7.3 实时快讯: 整页只显示标题(约 10 行), 底部不再挤摘要预览"""
     im, scr, pad = new_screen()
     d = ImageDraw.Draw(scr)
-    page_title(d, "实时快讯", "NEW 3")
-    for k, (t, tm) in enumerate(NEWS):
-        y = 26 + k * 23
+    page_title(d, "实时快讯", "10 条")
+    rows = ["埃及列车脱轨事故已致7死112伤",
+            "国内首个低空经济产业基金落地成都",
+            "央行开展 5000 亿元 MLF 操作",
+            "10 月 CPI 同比上涨 0.3%",
+            "新能源车 10 月零售同比增 28%",
+            "两市成交额突破 2.5 万亿元",
+            "美联储议息会议维持利率不变",
+            "黄金现货站上 4100 美元",
+            "工信部发布算力基础设施新规",
+            "沪深 300 指数成分股调整名单"]
+    for k in range(10):
+        y = 26 + k * 20
         on = (k == 1)
         if on:
-            rect(d, 0, y - 2, 240, 23, fill=SEL)
+            rect(d, 0, y - 2, 240, 20, fill=SEL)
         c = "#0B0E14" if on else FG
-        label = t if len(t) <= 18 else t[:17] + "…"
-        text(d, 4, y + 3, label, 10, c, bold=on)
-    line(d, 0, 142, W, 142, LINE, 2)
-    summary_lines = [
-        "【埃及列车脱轨事故已致7死112伤】",
-        "当地时间11月8日，根据埃及卫生部的最新",
-        "通报，当天发生在吉萨省阿亚特地区的列",
-        "车脱轨事故，已造成7人死亡、112人受伤…",
-    ]
-    for i, ln in enumerate(summary_lines):
-        text(d, 6, 150 + i * 17, ln, 9, FLAT)
+        label = rows[k] if len(rows[k]) <= 18 else rows[k][:17] + "…"
+        text(d, 4, y + 2, label, 10, c, bold=on)
     text(d, 4, 222, "2/10", 9, FLAT)
-    text(d, 60, 222, "M展开全文  双击刷新", 9, FLAT)
+    text(d, 60, 222, "M看全文  双击刷新", 9, FLAT)
     finish(im, scr, pad, "ui_news.png")
 
 
@@ -357,21 +362,22 @@ def draw_radio():
 
 
 def draw_info():
-    """v7.2 设备信息: 版本更新说明(1-100字) + 运行摘要"""
+    """v7.3 设备信息: 版本更新说明(1-100字) + 运行摘要"""
     im, scr, pad = new_screen()
     d = ImageDraw.Draw(scr)
     page_title(d, "设备信息", "任意键返回")
-    text(d, 6, 26, "固件 v7.2  股票", 11, ACC)
-    notes = ["新增实时财经快讯(标题+摘要,60秒自动更新)、",
-             "三连M进新闻、四连M进收音机、菜单可切股票/",
-             "收音机模式;提示音与MP3互斥,并修复模式切",
-             "换时的看门狗复位。"]
+    text(d, 6, 26, "固件 v7.3  股票", 11, ACC)
+    notes = ["新增沪金银主连/美股指数/外盘商品与网页",
+             "一键添加(标普500用gb_inx);修中文开放",
+             "WiFi;提醒间隔可选、关机15分档、底部快",
+             "讯条、新闻自动切换、敲击代M键;修复单只",
+             "大屏「放」:较前一交易日同时刻放量,亿元。"]
     for i, ln in enumerate(notes):
         text(d, 6, 44 + i * 15, ln, 9, FG)
     rows = ["网络 已连接", "IP 10.0.0.135  -46dBm", "音量60 亮度30 列表",
-            "内存118K PSRAM8M 运行9m", "快讯10条 12s前 电台0", "提醒开 3.0% 关机30分"]
+            "内存107K PSRAM8M 运行9m", "快讯10条 12s前 电台0", "提醒开 3.0% 间隔30分"]
     for i, r in enumerate(rows):
-        text(d, 6, 108 + i * 18, r, 10, FLAT)
+        text(d, 6, 124 + i * 16, r, 10, FLAT)
     text(d, 6, 220, "左右同按=中键  长按=关机", 9, FLAT)
     finish(im, scr, pad, "ui_info.png")
 
@@ -385,12 +391,12 @@ def draw_overview():
     Fsub = ImageFont.truetype(FONT_R, 22)
     Ftag = ImageFont.truetype(FONT_R, 18)
     d.text((56, 60), "正点原子 BOX0 股票固件", font=Fbig, fill="#FFFFFF")
-    d.text((58, 130), "ESP32-S3 · 240×240 桌面行情终端 · 网页管理 · OTA 升级", font=Fsub, fill=ACC)
-    feats = ["• 14 只默认自选股，红涨绿跌，单只 / 列表一键切换",
-             "• 实时财经快讯：标题 + 摘要，60 秒自动更新，三连 M 查看",
-             "• 网络收音机：四连 M 或菜单切换，提示音与 MP3 智能让路",
-             "• 两套可配时间窗口 + 全局 / 每只股票独立提醒阈值",
-             "• 8 组历史 WiFi 漫游 · 完整固件 0x0 一键刷入 · 网页 OTA"]
+    d.text((58, 130), "v7.3 · ESP32-S3 · 240×240 桌面行情终端 · 网页管理 · OTA 升级", font=Fsub, fill=ACC)
+    feats = ["• 多品种：A股 / 指数 / 港股 / 美股 / 沪金银主连 / 伦敦金 / 布伦特油",
+             "• 单只大屏「放」：较前一交易日同时刻成交额（亿元，+放量 −缩量）",
+             "• 实时快讯整页标题 + 点开看全文，可选底部滚动快讯条",
+             "• 网络收音机 · 提醒间隔可选 · 中文开放 WiFi · 敲击代 M",
+             "• 8 组 WiFi 漫游 · 完整固件 0x0 一键刷入 · 网页 OTA · 无需服务器"]
     for i, f in enumerate(feats):
         d.text((58, 200 + i * 42), f, font=Ftag, fill="#B9C4CF")
     d.text((58, 470), "M 三连看快讯  ·  M 四连听广播  ·  网页「升级」一键 OTA", font=Fsub, fill=SEL)

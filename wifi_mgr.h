@@ -23,4 +23,6 @@ void        powerOff();         // 关断整机电源(电池) / 深睡(USB 供�
 
 // WiFi 扫描: 只在未连上路由器时可用(避免扫描打断现有连接/AP)
 // 返回发现的网络数, ssid 出参需调用方提供 char[33] 数组
-int         wifiScan(String* ssidOut, int* rssiOut, int* encOut, int maxN);
+// v7.3: 可额外带回每个 AP 的 BSSID(12 位 hex) 与信道, 用于双频合一网络锁定 2.4G
+int         wifiScan(String* ssidOut, int* rssiOut, int* encOut, int maxN,
+                     String* bssidOut = nullptr, int* chOut = nullptr);

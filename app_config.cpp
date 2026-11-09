@@ -5,6 +5,10 @@ Preferences prefs;
 
 char    g_wifiSsid[33] = "";
 char    g_wifiPass[65] = "";
+// v7.3: 锁定扫描到的 2.4G AP(双频合一网络同名双 BSSID 时避免挑错)
+uint8_t g_wifiBssid[6] = {0, 0, 0, 0, 0, 0};
+uint8_t g_wifiChannel  = 0;
+bool    g_wifiHasBssid = false;
 char    g_adminPass[17] = "123456";
 uint8_t g_volume = 60;   // v7.0 出厂默认 60(提示音已温和化, 30 偏小)
 uint8_t g_bright = 30;       // 出厂默认 30%(用户 2026-11-07 指定, 省电不刺眼)
@@ -23,10 +27,18 @@ uint8_t  g_newsBeep    = 0;
 uint8_t  g_newsSummary = 1;
 volatile uint8_t g_appMode = APP_STOCK;   // 不落盘, 开机一律回股票模式
 volatile int8_t  g_pendingMode = -1;     // 网页请求由主 loop 消费
+// v7.3 新增配置
+uint16_t g_alertRepeatMin = 30;   // 30 分钟内同一只股票只提醒一次
+uint8_t  g_tickerNews     = 0;    // 底部快讯条默认关, 菜单/网页可开
+uint8_t  g_newsAuto       = 0;    // 新闻页默认手动切换
+uint8_t  g_newsAutoSec    = 8;
+uint8_t  g_micKnock       = 0;    // 敲击检测默认关(实验功能)
+uint16_t g_micThreshold   = 9000;
 
 // ---- 版本更新说明(设备信息页 / 网页设备页 /api/diag 共用, 每条 1-100 字) ----
 const FwNote FW_HISTORY[] = {
-  { "v7.2", FW_NOTES },
+  { "v7.3", FW_NOTES },
+  { "v7.2", "实时财经快讯(标题+摘要,60秒自动更新)、三连M进新闻、四连M进收音机、菜单可切股票/收音机模式;提示音与MP3互斥,并修复模式切换时的看门狗复位。" },
   { "v7.1", "两套独立时间窗口(信息更新/预警提示)、全局与每股独立提醒阈值、修复自动关机误唤醒、定时自动切换显示、0x0完整固件首发。" },
   { "v7.0", "8组历史WiFi自动漫游(含无密码)、状态栏六项重做、三键操作重设计与显式返回、网页升级tab与全接口面板、默认音量60。" },
 };
@@ -123,15 +135,19 @@ uint8_t     g_wifiProfileN = 0;
 static void cfgWifiSave() {
   prefs.putUChar("wpn", g_wifiProfileN);
   for (uint8_t i = 0; i < WIFI_PROFILE_N; i++) {
-    char ks[8], kp[8];
+    char ks[8], kp[8], kb[8], kc[8];
     snprintf(ks, sizeof(ks), "ws%u", (unsigned)i);
     snprintf(kp, sizeof(kp), "wp%u", (unsigned)i);
+    snprintf(kb, sizeof(kb), "wb%u", (unsigned)i);
+    snprintf(kc, sizeof(kc), "wc%u", (unsigned)i);
     if (i < g_wifiProfileN) {
       prefs.putString(ks, g_wifiProfiles[i].ssid);
       prefs.putString(kp, g_wifiProfiles[i].pass);
+      prefs.putBytes(kb, g_wifiProfiles[i].bssid, 6);
+      prefs.putUChar(kc, g_wifiProfiles[i].channel);
     } else if (prefs.isKey(ks)) {
-      prefs.remove(ks);
-      prefs.remove(kp);
+      prefs.remove(ks); prefs.remove(kp);
+      prefs.remove(kb); prefs.remove(kc);
     }
   }
 }
@@ -141,13 +157,17 @@ void cfgWifiLoad() {
   g_wifiProfileN = prefs.getUChar("wpn", 0);
   if (g_wifiProfileN > WIFI_PROFILE_N) g_wifiProfileN = WIFI_PROFILE_N;
   for (uint8_t i = 0; i < g_wifiProfileN; i++) {
-    char ks[8], kp[8];
+    char ks[8], kp[8], kb[8], kc[8];
     snprintf(ks, sizeof(ks), "ws%u", (unsigned)i);
     snprintf(kp, sizeof(kp), "wp%u", (unsigned)i);
+    snprintf(kb, sizeof(kb), "wb%u", (unsigned)i);
+    snprintf(kc, sizeof(kc), "wc%u", (unsigned)i);
     prefs.getString(ks, g_wifiProfiles[i].ssid, sizeof(g_wifiProfiles[i].ssid));
     prefs.getString(kp, g_wifiProfiles[i].pass, sizeof(g_wifiProfiles[i].pass));
     g_wifiProfiles[i].ssid[32] = 0;
     g_wifiProfiles[i].pass[64] = 0;
+    if (prefs.isKey(kb)) prefs.getBytes(kb, g_wifiProfiles[i].bssid, 6);
+    g_wifiProfiles[i].channel = prefs.getUChar(kc, 0);
   }
   // 旧固件只有单组 ssid/wpass: 自动迁移为第 1 组, 升级后不会掉网
   if (g_wifiSsid[0] && !g_wifiProfileN) {
@@ -166,13 +186,15 @@ int cfgWifiFind(const char* ssid) {
   return -1;
 }
 
-bool cfgWifiAdd(const char* ssid, const char* pass) {
+bool cfgWifiAdd(const char* ssid, const char* pass,
+                const uint8_t* bssid, uint8_t channel) {
   if (!ssid || !*ssid || strlen(ssid) > 32) return false;
   cfgLock();
   int found = cfgWifiFind(ssid);
   WifiProfile p; memset(&p, 0, sizeof(p));
   strncpy(p.ssid, ssid, 32); p.ssid[32] = 0;
   strncpy(p.pass, pass ? pass : "", 64); p.pass[64] = 0;
+  if (bssid && channel) { memcpy(p.bssid, bssid, 6); p.channel = channel; }
   if (found >= 0) {
     for (int i = found; i > 0; i--) g_wifiProfiles[i] = g_wifiProfiles[i - 1];
   } else {
@@ -209,6 +231,11 @@ bool cfgWifiUse(int idx) {
   strncpy(g_wifiPass, p.pass, 64); g_wifiPass[64] = 0;
   prefs.putString("ssid", g_wifiSsid);
   prefs.putString("wpass", g_wifiPass);
+  memcpy(g_wifiBssid, p.bssid, 6);
+  g_wifiChannel  = p.channel;
+  g_wifiHasBssid = (p.channel != 0 && p.channel <= 14);
+  prefs.putBytes("wbssid", g_wifiBssid, 6);
+  prefs.putUChar("wchan", g_wifiHasBssid ? g_wifiChannel : 0);
   cfgUnlock();
   return true;
 }
@@ -220,6 +247,10 @@ void cfgLoad() {
 
   prefs.getString("ssid", g_wifiSsid, sizeof(g_wifiSsid));
   prefs.getString("wpass", g_wifiPass, sizeof(g_wifiPass));
+  // v7.3: 读回上次锁定的 2.4G AP(旧配置没有这两个 key -> 不锁定, 行为同旧版)
+  if (prefs.isKey("wbssid")) prefs.getBytes("wbssid", g_wifiBssid, 6);
+  g_wifiChannel  = prefs.getUChar("wchan", 0);
+  g_wifiHasBssid = (g_wifiChannel > 0 && g_wifiChannel <= 14);
   prefs.getString("apass", g_adminPass, sizeof(g_adminPass));
 
   // 开源版本不预置任何真实 WiFi 凭据(旧版曾写死过一组, 已移除以防泄露)。
@@ -256,6 +287,13 @@ void cfgLoad() {
   g_newsSrc    = prefs.getUChar("nssrc", 0);
   g_newsBeep    = prefs.getUChar("nsbeep", 0) ? 1 : 0;
   g_newsSummary = prefs.getUChar("nssum",  1) ? 1 : 0;
+  // v7.3 新增: 提醒节流 / 底部快讯条 / 新闻自动切换 / 敲击检测
+  g_alertRepeatMin = prefs.getUShort("altrep", 30);
+  g_tickerNews     = prefs.getUChar("tknews",  0) ? 1 : 0;
+  g_newsAuto       = prefs.getUChar("nsauto",  0) ? 1 : 0;
+  g_newsAutoSec    = prefs.getUChar("nsautos", 8);
+  g_micKnock       = prefs.getUChar("mick",    0) ? 1 : 0;
+  g_micThreshold   = prefs.getUShort("mict",   9000);
   g_appMode = APP_STOCK;                        // 开机一律股票模式(不落盘)
   // ---- v7.1: 两套独立时间范围 ----
   if (prefs.getBytes("fwin", &g_fetchWin, sizeof(g_fetchWin)) != sizeof(g_fetchWin))
@@ -299,8 +337,12 @@ void cfgLoad() {
   if (g_autoPowerOff > 1) g_autoPowerOff = 1;
   // 0 = 用户主动「关闭自动关机」, 必须保留; 旧版这里把 0 钳成 30,
   // 导致网页里关掉关机后一重启又自动打开(v7.2 修)。
-  if (g_powerOffMin != 0 && (g_powerOffMin < 30 || g_powerOffMin > 240))
-    g_powerOffMin = 30;
+  // v7.3: 档位表新增 15 分钟, 不能再写死 "<30 就归 30", 否则 15 分档保存不住
+  if (g_powerOffMin != 0) {
+    bool poffOk = false;
+    for (int i = 0; i < POFF_N; i++) if (POFF_STEPS[i] == g_powerOffMin) { poffOk = true; break; }
+    if (!poffOk) g_powerOffMin = 30;
+  }
   if (g_refreshSec < 3)  g_refreshSec = 6;
   if (g_refreshSec > 120) g_refreshSec = 120;
   if (g_jumpSec < 2)   g_jumpSec = 5;
@@ -313,6 +355,12 @@ void cfgLoad() {
   if (g_newsSrc > NEWS_SRC - 1) g_newsSrc = 0;
   if (g_newsBeep > 1)    g_newsBeep = 0;
   if (g_newsSummary > 1) g_newsSummary = 1;
+  bool repOk = false;                      // v7.3 提醒间隔只允许 6 个标准档
+  for (int i = 0; i < ALERT_REPEAT_N; i++)
+    if (ALERT_REPEAT_STEPS[i] == g_alertRepeatMin) repOk = true;
+  if (!repOk) g_alertRepeatMin = 30;
+  if (g_newsAutoSec < 3 || g_newsAutoSec > 60) g_newsAutoSec = 8;
+  if (g_micThreshold < 500 || g_micThreshold > 30000) g_micThreshold = 9000;
   if (g_alertOn > 1)   g_alertOn = 1;
   if (g_alertPct < 1.0f || g_alertPct > 20.0f) g_alertPct = 3.0f;
   if (g_workdayOnly > 1) g_workdayOnly = 1;
@@ -365,6 +413,8 @@ void cfgSaveSettings() {
   s_volDirty = false;
   prefs.putString("ssid", g_wifiSsid);
   prefs.putString("wpass", g_wifiPass);
+  prefs.putBytes("wbssid", g_wifiBssid, 6);
+  prefs.putUChar("wchan", g_wifiHasBssid ? g_wifiChannel : 0);
   prefs.putString("apass", g_adminPass);
   prefs.putUChar("vol", g_volume);
   prefs.putUChar("brt", g_bright);
@@ -380,6 +430,12 @@ void cfgSaveSettings() {
   prefs.putUChar("nssrc", g_newsSrc);
   prefs.putUChar("nsbeep", g_newsBeep);
   prefs.putUChar("nssum",  g_newsSummary);
+  prefs.putUShort("altrep", g_alertRepeatMin);
+  prefs.putUChar("tknews",  g_tickerNews);
+  prefs.putUChar("nsauto",  g_newsAuto);
+  prefs.putUChar("nsautos", g_newsAutoSec);
+  prefs.putUChar("mick",    g_micKnock);
+  prefs.putUShort("mict",   g_micThreshold);
   prefs.putUChar("alton", g_alertOn);
   prefs.putFloat("altpct", g_alertPct);
   prefs.putBytes("altper", g_alertPer, sizeof(g_alertPer));
@@ -421,6 +477,9 @@ void cfgFactoryReset() {
   cfgUnlock();
   strcpy(g_wifiSsid, "");
   strcpy(g_wifiPass, "");
+  memset(g_wifiBssid, 0, sizeof(g_wifiBssid));
+  g_wifiChannel = 0;
+  g_wifiHasBssid = false;
   memset(g_wifiProfiles, 0, sizeof(g_wifiProfiles));
   g_wifiProfileN = 0;
   strcpy(g_adminPass, "123456");
@@ -438,6 +497,12 @@ void cfgFactoryReset() {
   g_newsSrc = 0;
   g_newsBeep = 0;
   g_newsSummary = 1;
+  g_alertRepeatMin = 30;
+  g_tickerNews = 0;
+  g_newsAuto = 0;
+  g_newsAutoSec = 8;
+  g_micKnock = 0;
+  g_micThreshold = 9000;
   g_appMode = APP_STOCK;
   g_fetchWin = { TW_DEF_AM_S, TW_DEF_AM_E, TW_DEF_PM_S, TW_DEF_PM_E };
   g_alertWin = { TW_DEF_AM_S, TW_DEF_AM_E, TW_DEF_PM_S, TW_DEF_PM_E };

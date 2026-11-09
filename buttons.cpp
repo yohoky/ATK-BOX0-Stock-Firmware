@@ -243,3 +243,7 @@ uint8_t btnRawState() {
 uint32_t btnEdgeCount(int i) {
   return (i >= 0 && i < 3) ? s_edge[i] : 0;
 }
+
+void btnInject(BtnEvent e) {
+  if (e != BTN_NONE) push(e);
+}

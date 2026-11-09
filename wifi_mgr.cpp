@@ -66,19 +66,31 @@ static int pickSavedByScan(int exclude) {
   return best;
 }
 
-// 用指定历史 WiFi 发起连接, 并把它置顶为"最近使用"
-static bool beginProfile(int idx) {
-  if (!cfgWifiUse(idx)) return false;
-  Serial.printf("[WiFi] 连接已保存网络 \"%s\"\n", g_wifiSsid);
+// v7.3 统一连接入口:
+//   * 中文 / GBK SSID 按扫描时的原始字节保存, 这里直接用, 不再经过任何编码转换
+//   * 2.4G+5G 双频合一(同名双 BSSID)用扫描时记下的 BSSID/信道锁定 2.4G 那个 AP
+//   * 开放网络必须传 NULL passphrase; 传 "" 在部分 IDF 版本会被当 WPA 而认证失败
+static void beginSTA() {
   WiFi.disconnect(false, false);
   delay(30);
-  // 无密码(开放)网络必须走单参数 begin; 传空字符串在部分固件上会被当 WPA 而认证失败
-  if (!g_wifiPass[0]) WiFi.begin(g_wifiSsid);
-  else                WiFi.begin(g_wifiSsid, g_wifiPass);
+  bool locked = g_wifiHasBssid && g_wifiChannel > 0 && g_wifiChannel <= 14;
+  const char* pw = g_wifiPass[0] ? g_wifiPass : nullptr;
+  if (locked)  WiFi.begin(g_wifiSsid, pw, (int32_t)g_wifiChannel, g_wifiBssid);
+  else if (pw) WiFi.begin(g_wifiSsid, pw);
+  else         WiFi.begin(g_wifiSsid);
   s_t0 = millis();
   s_staOn = true;
   g_wifiRc = 0;
   g_wifiState = WIFI_CONNECTING;
+  Serial.printf("[WiFi] begin open=%d ch=%u locked=%d\n",
+                (int)(pw == nullptr), (unsigned)g_wifiChannel, (int)locked);
+}
+
+// 用指定历史 WiFi 发起连接, 并把它置顶为"最近使用"
+static bool beginProfile(int idx) {
+  if (!cfgWifiUse(idx)) return false;
+  Serial.printf("[WiFi] 连接已保存网络 \"%s\"\n", g_wifiSsid);
+  beginSTA();
   return true;
 }
 
@@ -90,15 +102,7 @@ static void startSTA() {
     return;
   }
   Serial.printf("[WiFi] 连接 \"%s\" ...\n", g_wifiSsid);
-  WiFi.disconnect(false, false);
-  delay(30);
-  // 无密码(开放)网络必须走单参数 begin; 传空字符串在部分固件上会被当 WPA 而认证失败
-  if (!g_wifiPass[0]) WiFi.begin(g_wifiSsid);
-  else                WiFi.begin(g_wifiSsid, g_wifiPass);
-  s_t0    = millis();
-  s_staOn = true;
-  g_wifiRc = 0;
-  g_wifiState = WIFI_CONNECTING;
+  beginSTA();
 }
 
 void wifiInit() {
@@ -123,21 +127,45 @@ void wifiInit() {
 }
 
 // 带超时的扫描: 扫描会短暂占用射频(AP 可能断 1 秒), 因此只允许未连上时调用
-int wifiScan(String* ssidOut, int* rssiOut, int* encOut, int maxN) {
+int wifiScan(String* ssidOut, int* rssiOut, int* encOut, int maxN,
+             String* bssidOut, int* chOut) {
   // ★ 允许"已连上路由器"时随时扫描(用户要能换 WiFi)。
-  //   同步扫描约 2-3 秒会短暂占用射频, 期间行情可能少刷一次, 但不会断连。
   int n = WiFi.scanNetworks(false, true);         // 同步扫描, 含隐藏 SSID
   if (n <= 0) { WiFi.scanDelete(); return 0; }
   int out = 0;
   for (int i = 0; i < n && out < maxN; i++) {
     String s = WiFi.SSID(i);
     if (!s.length()) continue;
+    int ch = WiFi.channel(i);
+    int rssi = WiFi.RSSI(i);
     bool dup = false;
-    for (int k = 0; k < out; k++) if (ssidOut[k] == s) { dup = true; break; }
+    for (int k = 0; k < out; k++) {
+      if (ssidOut[k] != s) continue;
+      dup = true;
+      // 2.4G/5G 双频合一: 同名 SSID 会有两个 BSSID。ESP32-S3 只有 2.4G 射频,
+      // 优先保留 2.4G(ch<=14)那条; 同为 2.4G 时保留信号更强的。
+      if (bssidOut && chOut &&
+          ((ch <= 14 && chOut[k] > 14) ||
+           (ch <= 14 && chOut[k] <= 14 && rssi > rssiOut[k]))) {
+        chOut[k] = ch; rssiOut[k] = rssi;
+        encOut[k] = (int)WiFi.encryptionType(i);
+        uint8_t* bm = WiFi.BSSID(i);
+        if (bm) { char h[13]; snprintf(h, sizeof(h), "%02x%02x%02x%02x%02x%02x",
+                    bm[0],bm[1],bm[2],bm[3],bm[4],bm[5]); bssidOut[k] = h; }
+      }
+      break;
+    }
     if (dup) continue;
     ssidOut[out] = s;
-    rssiOut[out] = WiFi.RSSI(i);
+    rssiOut[out] = rssi;
     encOut[out]  = (int)WiFi.encryptionType(i);
+    if (chOut)    chOut[out] = ch;
+    if (bssidOut) {
+      uint8_t* bm = WiFi.BSSID(i);
+      if (bm) { char h[13]; snprintf(h, sizeof(h), "%02x%02x%02x%02x%02x%02x",
+                  bm[0],bm[1],bm[2],bm[3],bm[4],bm[5]); bssidOut[out] = h; }
+      else bssidOut[out] = "";
+    }
     out++;
   }
   WiFi.scanDelete();

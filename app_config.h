@@ -9,6 +9,9 @@
 #define STA_URL_LEN   128
 #define STK_CODE_LEN  14
 
+// v7.3: 行情品种扩展(沪金银主连/美股与美股指数/伦敦金布伦特等) + 网页一键添加
+//       / 中文·开放 WiFi 按原始字节连接并锁定 2.4G BSSID / 新闻页整页列表
+//       / 新闻与收音机取消自动返回 / 修收音机 M 键暂停后无法恢复
 // v7.2: 实时财经快讯(标题+摘要, 60秒自动更新) / 三连M进新闻 / 四连M进收音机
 //       / 菜单切换股票·收音机工作模式 / I2S 运行时归属切换(提示音与MP3互斥) / 版本更新说明
 // v7.1: 信息更新/预警提示两套独立时间范围 / 每只股票独立提醒阈值(互不影响)
@@ -20,7 +23,7 @@
 // v6.1.1: 修 Web load() 访问已删除的电台控件导致设置项加载不全
 // v6.1: 修 ES8311 0x32 音量(本机无声) / 去掉 beep 时 CODEC_PWR 断电毛刺(USB 重枚举)
 //       / M 键高电平有效 / 电池官方标定 / I2C 假地址
-#define FW_VERSION    "v7.2"
+#define FW_VERSION    "v7.3"
 
 // v7.2 恢复网络电台: 播放链路沿用原厂 ES8311 上电序列 + I2S 引脚。
 // 提示音与 MP3 不会同时播放: 进收音机模式时 beep 释放 I2S 通道交给解码器,
@@ -28,7 +31,7 @@
 #define ENABLE_RADIO  1
 
 // ---- 版本更新说明(设备信息页显示, 每条 1-100 字) ----
-#define FW_NOTES "新增实时财经快讯(标题+摘要,60秒自动更新)、三连M进新闻、四连M进收音机、菜单可切股票/收音机模式;提示音与MP3互斥,并修复模式切换时的看门狗复位。"
+#define FW_NOTES "新增沪金银主连/美股指数/外盘商品与网页一键添加(标普500用gb_inx);修中文开放WiFi;提醒间隔可选、关机15分档、底部快讯条、新闻自动切换、敲击代M键;修复单只大屏「放」:较前一交易日同时刻放量,单位亿元。"
 struct FwNote { const char* ver; const char* text; };
 extern const FwNote FW_HISTORY[];
 extern const int    FW_HISTORY_N;
@@ -42,7 +45,7 @@ extern volatile int8_t  g_pendingMode;  // -1=无请求, APP_STOCK/APP_RADIO=待
 // 实时新闻(东方财富 7x24 快讯, HTTP 明文, 标题 + 摘要)
 #define MAX_NEWS      20
 #define NEWS_TITLE    116   // utf8 字节(≈38 汉字)
-#define NEWS_SUMMARY  220   // utf8 字节(≈73 汉字), 摘要可分行显示
+#define NEWS_SUMMARY  512   // v7.3: 放宽到 ≈170 汉字, 详情页铺满屏幕时用
 #define NEWS_CODE     24    // 唯一 ID, 用于按条去重
 #define NEWS_TIME     20    // "2026-11-09 01:20:00"
 #define NEWS_SRC      3     // 保留兼容: 0=全部快讯 1=只看财经 2=只看科技
@@ -75,6 +78,10 @@ struct Station {
 struct WifiProfile {
   char ssid[33];
   char pass[65];
+  // v7.3: 记住扫描到的 AP。2.4G/5G 合一(同名双 BSSID)时用它锁定 2.4G 那个,
+  // 避免 ESP32 在同名 AP 之间来回挑、或选到不支持的 5G。
+  uint8_t bssid[6];
+  uint8_t channel;   // 0 = 不指定(手输 SSID 或旧配置)
 };
 
 struct StockDef {
@@ -103,10 +110,15 @@ extern char     g_wifiPass[65];
 extern char     g_adminPass[17];
 extern WifiProfile g_wifiProfiles[WIFI_PROFILE_N];
 extern uint8_t  g_wifiProfileN;
+// v7.3: 当前网络锁定的 AP(全 0 / channel=0 表示不锁定)
+extern uint8_t  g_wifiBssid[6];
+extern uint8_t  g_wifiChannel;
+extern bool     g_wifiHasBssid;
 
-// 历史 WiFi 管理(NVS: wpn + ws0/wp0 ... ws7/wp7)
+// 历史 WiFi 管理(NVS: wpn + ws0/wp0 ... ws7/wp7, v7.3 起另存 wb0/wc0)
 void cfgWifiLoad();                                  // cfgLoad 内调用, 含旧单组配置迁移
-bool cfgWifiAdd(const char* ssid, const char* pass);// 新增/更新并置顶, 超出 8 组淘汰最旧
+bool cfgWifiAdd(const char* ssid, const char* pass,
+                const uint8_t* bssid = nullptr, uint8_t channel = 0); // 新增/更新并置顶, 超出 8 组淘汰最旧
 bool cfgWifiDel(int idx);                            // 删除某组
 bool cfgWifiUse(int idx);                            // 选中某组为当前网络并置顶
 int  cfgWifiFind(const char* ssid);                  // 按 SSID 查索引, -1=没有
@@ -116,10 +128,11 @@ extern uint8_t  g_autoOffMin;     // 自动熄屏分钟: 0=不熄屏, 1/3/5/10/3
 extern uint8_t  g_autoPowerOff;   // 1=熄屏后无操作自动关机, 0=关(默认开)
 extern uint8_t  g_powerOffMin;    // 熄屏后多少分钟关机: 0=关 / 30 / 60 / 120 / 240
 // 自动关机档位(分钟), 盒子菜单与 Web 共用
-static const uint16_t POFF_STEPS[] = {0, 30, 60, 120, 240};
+static const uint16_t POFF_STEPS[] = {0, 15, 30, 60, 120, 240};  // v7.3 新增 15 分钟档
 #define POFF_N ((int)(sizeof(POFF_STEPS) / sizeof(POFF_STEPS[0])))
 static inline const char* poffName(uint16_t m) {
   switch (m) {
+    case 15:  return "息屏后15分";
     case 30:  return "息屏后30分";
     case 60:  return "息屏后1时";
     case 120: return "息屏后2时";
@@ -153,6 +166,27 @@ extern float    g_alertPer[MAX_STOCKS];
 // ---- 自动显示模式 ----
 extern uint8_t  g_gyroOn;      // 保留: 若以后外接 IMU, 1=优先用重力方向
 extern uint8_t  g_autoSwitchSec; // DISP_AUTO 时每 N 秒在列表/单只间切换; 0=不切换
+
+// ---- v7.3 新增配置 ----
+// 涨跌提醒节流: 每只股票在 N 分钟内最多提醒一次; 1440 = 一天一次(旧版行为)
+static const uint16_t ALERT_REPEAT_STEPS[] = {5, 15, 30, 60, 120, 1440};
+#define ALERT_REPEAT_N ((int)(sizeof(ALERT_REPEAT_STEPS) / sizeof(ALERT_REPEAT_STEPS[0])))
+static inline const char* alertRepeatName(uint16_t m) {
+  switch (m) {
+    case 5:   return "5分钟";
+    case 15:  return "15分钟";
+    case 30:  return "30分钟";
+    case 60:  return "60分钟";
+    case 120: return "120分钟";
+    default:  return "一天";
+  }
+}
+extern uint16_t g_alertRepeatMin;  // 默认 30(分钟内只响一次)
+extern uint8_t  g_tickerNews;      // 主界面底部滚动快讯条 0=关 1=开
+extern uint8_t  g_newsAuto;        // 新闻页自动切换 0=手动 1=自动
+extern uint8_t  g_newsAutoSec;     // 自动切换间隔(秒)
+extern uint8_t  g_micKnock;        // 敲击检测代替 M 键 0=关(默认) 1=开
+extern uint16_t g_micThreshold;    // 敲击能量阈值(0-32767)
 extern uint8_t  g_autoEffMode;   // 运行时实际显示模式(不落盘)
 extern Station  g_stations[MAX_STATIONS];
 extern uint8_t  g_nStation;
