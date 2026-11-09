@@ -77,8 +77,13 @@ enum MenuIdx {
   MENU_NEWS,        // v7.2 实时快讯(三连 M 的兜底入口)
   MENU_ALERT_REP,   // v7.3 提醒间隔: 5/15/30/60/120分钟/一天
   MENU_TICKER,      // v7.3 主界面底部滚动快讯条 开/关
+  MENU_NEWS_AUTO,   // v7.4 新闻页自动展播: 手动/5/10/20/30 秒
+  MENU_MIC,         // v7.4 麦克风敲击代 M 键 开/关 + 阈值
   MENU_N
 };
+
+// v7.4: 「工作模式」设置页里的临时选择(不落盘, 按 M 才真正切换)
+extern volatile uint8_t g_menuPickMode;
 
 extern volatile UiScene g_scene;
 extern volatile int     g_menuSel;

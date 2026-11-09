@@ -212,8 +212,10 @@ static void menuEnter() {
   } else if (sel == MENU_BEEP) {
     beepTest();
     toast("提示音测试", 0x05BF);
-  } else if (sel == MENU_MODE) {            // v7.2: 菜单里切股票/收音机
-    setAppMode(g_appMode == APP_STOCK ? APP_RADIO : APP_STOCK);
+  } else if (sel == MENU_MODE) {            // v7.4: 进设置页选股票/收音机, 按 M 应用
+    g_menuPickMode = g_appMode;
+    g_scene = SCENE_ADJ;
+    uiInvalidate();
   } else if (sel == MENU_NEWS) {            // v7.2: 三连 M 的兜底入口
     g_scene = SCENE_NEWS;
     g_newsSel = 0;
@@ -223,8 +225,9 @@ static void menuEnter() {
     newsTakeNew();
     uiInvalidate();
   } else if (sel == MENU_BRIGHT || sel == MENU_VOL || sel == MENU_JUMP ||
-             sel == MENU_REFRESH || sel == MENU_APOW ||
-             sel == MENU_ALERT || sel == MENU_OFF) {
+             sel == MENU_REFRESH || sel == MENU_APOW || sel == MENU_ALERT ||
+             sel == MENU_OFF || sel == MENU_ALERT_REP || sel == MENU_TICKER ||
+             sel == MENU_NEWS_AUTO || sel == MENU_MIC) {
     g_scene = SCENE_ADJ;
     uiInvalidate();
   } else if (sel == MENU_INFO) {
@@ -232,6 +235,10 @@ static void menuEnter() {
     uiInvalidate();
   } else if (sel == MENU_RESET || sel == MENU_POWER) {
     g_scene = SCENE_CONFIRM;
+    uiInvalidate();
+  } else {
+    // 兜底: 任何没写进上面的菜单项也进设置页, 不允许"按 M 毫无反应"
+    g_scene = SCENE_ADJ;
     uiInvalidate();
   }
 }
@@ -341,6 +348,18 @@ static void handleAdj(BtnEvent e) {
       toast(m, g_alertOn ? 0x05BF : 0x8410);
       return;
     }
+    if (g_menuSel == MENU_MODE) {
+      // v7.4: 真正切换工作模式(设置页里按 M 应用)
+      uint8_t want = g_menuPickMode;
+      g_scene = SCENE_MENU;
+      if (want != g_appMode) {
+        setAppMode(want);                   // 会自己把 scene 设成对应主页
+      } else {
+        toast(want == APP_RADIO ? "已是收音机模式" : "已是股票模式");
+        uiInvalidate();
+      }
+      return;
+    }
     g_scene = SCENE_MENU;
     uiInvalidate();
     return;
@@ -398,9 +417,48 @@ static void handleAdj(BtnEvent e) {
   }
   // v7.3: 主界面底部滚动快讯条(列表/单只大屏都留一行)
   if (g_menuSel == MENU_TICKER) {
-    g_tickerNews = g_tickerNews ? 0 : 1;
+    g_tickerNews = up ? 1 : 0;             // 右键=开, 左键=关(不会因连发来回跳)
     cfgSaveSettings();
     toast(g_tickerNews ? "底部快讯条 开" : "底部快讯条 关", 0x05BF);
+    uiInvalidate();
+    return;
+  }
+  // v7.4: 新闻页自动展播 关/5/10/20/30 秒
+  if (g_menuSel == MENU_NEWS_AUTO) {
+    uint16_t cur = g_newsAuto ? g_newsAutoSec : 0;
+    int idx = 0;
+    for (int i = 0; i < NEWS_AUTO_N; i++) if (NEWS_AUTO_STEPS[i] == cur) { idx = i; break; }
+    idx = constrain(idx + (up ? 1 : -1), 0, NEWS_AUTO_N - 1);
+    g_newsAutoSec = (uint8_t)NEWS_AUTO_STEPS[idx];
+    g_newsAuto    = g_newsAutoSec ? 1 : 0;
+    cfgSaveSettings();
+    toast(g_newsAuto ? newsAutoName(g_newsAutoSec) : "新闻手动翻页", 0x05BF);
+    uiInvalidate();
+    return;
+  }
+  // v7.4: 麦克风敲击代 M 键: 左右短按开关, 长按调阈值
+  if (g_menuSel == MENU_MIC) {
+    if (e == BTN_L_LONG || e == BTN_R_LONG) {
+      int th = (int)g_micThreshold + (e == BTN_R_LONG ? 200 : -200);
+      if (th < 200) th = 200;
+      if (th > 12000) th = 12000;
+      g_micThreshold = (uint16_t)th;
+      cfgSaveSettings();
+      char m[32];
+      snprintf(m, sizeof(m), "阈值 %d", th);
+      toast(m, 0x05BF);
+    } else {
+      g_micKnock = g_micKnock ? 0 : 1;
+      if (g_micKnock) micKnockResetRx();
+      cfgSaveSettings();
+      toast(g_micKnock ? "敲击代M键 开" : "敲击代M键 关", 0x05BF);
+    }
+    uiInvalidate();
+    return;
+  }
+  // v7.4: 工作模式页: 左右在两个选项间切换(按 M 才应用)
+  if (g_menuSel == MENU_MODE) {
+    g_menuPickMode = (g_menuPickMode == APP_RADIO) ? APP_STOCK : APP_RADIO;
     uiInvalidate();
     return;
   }

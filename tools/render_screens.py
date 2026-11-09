@@ -154,8 +154,8 @@ def draw_single():
     finish(im, scr, pad, "ui_single.png")
 
 
-MENU = ["自动熄屏", "测试提示音", "设备信息", "恢复出厂", "关机",
-        "工作模式", "实时新闻", "提醒间隔", "底部快讯"]  # v7.3: 菜单共 16 项, 展示末页附近
+MENU = ["工作模式", "实时新闻", "提醒间隔", "底部快讯", "新闻自动", "麦克风"]
+VALS = ["股票", "10条", "30分钟", "关", "手动", "关"]   # v7.4: 菜单共 18 项, 展示末页
 
 
 def draw_menu():
@@ -164,18 +164,19 @@ def draw_menu():
     rect(d, 0, 0, W, 24, fill="#141A22")
     text(d, 8, 4, "菜单", 13, FG, bold=True)
     text(d, 232, 6, "M长按退出", 8, FLAT, anchor="ra")
-    vals = ["1 分钟", "试听", "版本说明", "恢复默认", "关机",
-            "股票", "10条", "30分钟", "关"]
     for i, nm in enumerate(MENU):
-        y = 26 + i * 21          # v7.3: 行高收紧, 给底部提示留出间距
-        if i == 7:
+        y = 28 + i * 23          # 与固件一致: 6 行, 行高 23
+        sel = (i == 2)
+        if sel:
             rect(d, 4, y - 3, 232, 20, fill=SEL, radius=3)
-        c = "#0B0E14" if i == 7 else FG
+        c = "#0B0E14" if sel else FG
         text(d, 10, y, nm, 11, c, bold=True)
-        text(d, 230, y + 1, vals[i], 9, c if i == 7 else ACC, anchor="ra")
-    rect(d, 237, 26, 2, 188, fill=DIM)
-    rect(d, 237, 26, 2, 150, fill=ACC)
-    text(d, 6, 222, "左右选 M确定 双键返回 · 共16项", 8, FLAT)
+        text(d, 230, y + 1, VALS[i], 9, c if sel else ACC, anchor="ra")
+    rect(d, 237, 26, 2, 138, fill=DIM)          # 滚动条(6 行可视 / 18 项)
+    rect(d, 237, 26 + 138 - 46, 2, 46, fill=ACC)
+    text(d, 6, 178, "左右选 M确定 双键返回", 8, FLAT)
+    text(d, 6, 200, "M长按回主界面 设置自动保存", 8, FLAT)
+    text(d, 6, 222, "共 18 项 · 末页 5 项为 v7.4 新增可设置", 8, FLAT)
     finish(im, scr, pad, "ui_menu.png")
 
 

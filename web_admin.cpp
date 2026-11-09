@@ -1075,6 +1075,12 @@ static void handleDiag(AsyncWebServerRequest* r) {
   j["fwNotes"] = FW_NOTES;
   // ---- v7.2 工作模式 / I2S 归属 / 实时快讯 / 收音机 ----
   j["appMode"] = (int)g_appMode;
+  j["scene"]   = (int)g_scene;      // v7.4: 0主界面 1菜单 2设置页 3信息 4确认 5新闻 6收音机
+  j["menuSel"] = (int)g_menuSel;
+  j["menuN"]   = (int)g_menuListN;
+  j["displayMode"] = (int)g_displayMode;
+  j["newsAuto"]    = (int)g_newsAuto;
+  j["newsAutoSec"] = (int)g_newsAutoSec;
   // 调试: 1=POWERON 2=SW 3=PANIC 4=INT_WDT 5=TASK_WDT 6=WDT 7=DEEPSLEEP ...
   j["resetReason"] = (int)esp_reset_reason();
   j["radioStage"] = radioStage();   // RTC_NOINIT 标记, 重启后仍能看到崩在哪一步
@@ -1815,6 +1821,41 @@ void webBegin() {
     if (!isAuthed(r)) { r->send(401); return; }
     s_powerOffAt = millis() + 800;   // 先回响应, 再断电
     sendOk(r, true);
+  });
+
+  // ---- v7.4 按键注入(调试): 远程模拟按一下三键, 用于没人守在盒子旁边时验证菜单 ----
+  //   GET /api/key?e=m       中键短按(菜单里=进入当前项)
+  //   GET /api/key?e=l|r     左/右短按(菜单里=上下选, 设置页里=减/加)
+  //   GET /api/key?e=ml|ll|rl 长按,  e=m2 双击,  e=lr 左右同按(返回/进菜单)
+  //   返回当前 scene / menuSel / appMode, 便于确认每一步真的生效。
+  server.on("/api/key", HTTP_GET, [](AsyncWebServerRequest* r) {
+    if (!isAuthed(r)) { r->send(401); return; }
+    String k = r->hasParam("e") ? r->getParam("e")->value() : "";
+    BtnEvent ev = BTN_NONE;
+    if      (k == "l")  ev = BTN_L_SHORT;
+    else if (k == "r")  ev = BTN_R_SHORT;
+    else if (k == "m")  ev = BTN_M_SHORT;
+    else if (k == "m2") ev = BTN_M_DOUBLE;
+    else if (k == "ml") ev = BTN_M_LONG;
+    else if (k == "ll") ev = BTN_L_LONG;
+    else if (k == "rl") ev = BTN_R_LONG;
+    else if (k == "lr") ev = BTN_LR_SHORT;
+    if (ev != BTN_NONE) btnInject(ev);
+    uiTouch();
+    AsyncJsonResponse* resp = new AsyncJsonResponse(false);
+    JsonVariant j = resp->getRoot();
+    j["key"]     = k;
+    j["scene"]   = (int)g_scene;
+    j["menuSel"] = (int)g_menuSel;
+    j["appMode"] = (int)g_appMode;
+    j["ticker"]  = (int)g_tickerNews;
+    j["alertRep"] = g_alertRepeatMin;
+    j["newsAuto"] = (int)g_newsAuto;
+    j["newsAutoSec"] = (int)g_newsAutoSec;
+    j["micKnock"] = (int)g_micKnock;
+    j["micTh"]   = (int)g_micThreshold;
+    resp->setLength();
+    r->send(resp);
   });
 
   // ---- 恢复出厂 ----

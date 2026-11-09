@@ -22,7 +22,7 @@ if not exist "%ESPTOOL%" (
   goto :end
 )
 
-set "BIN=%~dp0firmware\box0_stock_v7.3.bin"
+set "BIN=%~dp0firmware\box0_stock_v7.4.bin"
 if not exist "%BIN%" (
   echo [ERR] 固件不存在: %BIN%
   goto :end

@@ -23,7 +23,7 @@
 // v6.1.1: 修 Web load() 访问已删除的电台控件导致设置项加载不全
 // v6.1: 修 ES8311 0x32 音量(本机无声) / 去掉 beep 时 CODEC_PWR 断电毛刺(USB 重枚举)
 //       / M 键高电平有效 / 电池官方标定 / I2C 假地址
-#define FW_VERSION    "v7.3"
+#define FW_VERSION    "v7.4"
 
 // v7.2 恢复网络电台: 播放链路沿用原厂 ES8311 上电序列 + I2S 引脚。
 // 提示音与 MP3 不会同时播放: 进收音机模式时 beep 释放 I2S 通道交给解码器,
@@ -31,7 +31,7 @@
 #define ENABLE_RADIO  1
 
 // ---- 版本更新说明(设备信息页显示, 每条 1-100 字) ----
-#define FW_NOTES "新增沪金银主连/美股指数/外盘商品与网页一键添加(标普500用gb_inx);修中文开放WiFi;提醒间隔可选、关机15分档、底部快讯条、新闻自动切换、敲击代M键;修复单只大屏「放」:较前一交易日同时刻放量,单位亿元。"
+#define FW_NOTES "菜单补全: 工作模式/提醒间隔/底部快讯/新闻自动展播/麦克风敲击全部可在盒子上按左右键进设置页并保存(之前按M没反应); 新增新闻自动展播档位(关/5/10/20/30秒)开关机不吃设置; 新增按键注入调试接口。"
 struct FwNote { const char* ver; const char* text; };
 extern const FwNote FW_HISTORY[];
 extern const int    FW_HISTORY_N;
@@ -182,6 +182,18 @@ static inline const char* alertRepeatName(uint16_t m) {
   }
 }
 extern uint16_t g_alertRepeatMin;  // 默认 30(分钟内只响一次)
+// v7.4 新闻页自动展播档位(秒): 0 = 手动(不自动翻)
+static const uint16_t NEWS_AUTO_STEPS[] = {0, 5, 10, 20, 30};
+#define NEWS_AUTO_N ((int)(sizeof(NEWS_AUTO_STEPS) / sizeof(NEWS_AUTO_STEPS[0])))
+static inline const char* newsAutoName(uint16_t s) {
+  switch (s) {
+    case 5:   return "5秒";
+    case 10:  return "10秒";
+    case 20:  return "20秒";
+    case 30:  return "30秒";
+    default:  return "手动";
+  }
+}
 extern uint8_t  g_tickerNews;      // 主界面底部滚动快讯条 0=关 1=开
 extern uint8_t  g_newsAuto;        // 新闻页自动切换 0=手动 1=自动
 extern uint8_t  g_newsAutoSec;     // 自动切换间隔(秒)

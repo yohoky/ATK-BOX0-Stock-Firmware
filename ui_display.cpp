@@ -5,6 +5,7 @@
 #include "radio_player.h"
 #include "news_feed.h"
 #include "gyro_imu.h"
+#include "mic_knock.h"
 #include <WiFi.h>
 #include <esp_heap_caps.h>
 
@@ -111,6 +112,7 @@ void uiClearAlert()  { s_alertIdx = -1; s_alertUntil = 0; s_alertJitter = 0; s_d
 volatile UiScene g_scene = SCENE_MAIN;
 volatile int     g_menuSel = 0;
 volatile uint8_t g_menuListN = MENU_N;
+volatile uint8_t g_menuPickMode = APP_STOCK;
 volatile int     g_stationSel = 0;
 volatile int     g_newsSel = 0;    // 新闻子页光标
 volatile uint8_t g_newsDetail = 0; // v7.2: 1=展开全文摘要
@@ -129,7 +131,7 @@ static volatile uint32_t s_toastUntil = 0;
 static const char* MENU_NAME[MENU_N] = {
   "显示模式", "轮播间隔", "刷新间隔", "涨跌提醒", "自动关机", "亮度",
   "音量", "自动熄屏", "测试提示音", "设备信息", "恢复出厂", "关机",
-  "工作模式", "实时新闻", "提醒间隔", "底部快讯"
+  "工作模式", "实时新闻", "提醒间隔", "底部快讯", "新闻自动", "麦克风"
 };
 
 // GB2312 字库里有"涨"没有"跌"? 有的(GB2312 一级字库). 
@@ -176,6 +178,11 @@ static const char* menuValue(int i, char* buf, int n) {
     case MENU_NEWS:  snprintf(buf, n, "%u条", (unsigned)g_nNews); return buf;
     case MENU_ALERT_REP: return alertRepeatName(g_alertRepeatMin);
     case MENU_TICKER:    return g_tickerNews ? "开" : "关";
+    case MENU_NEWS_AUTO:
+      if (g_newsAuto) snprintf(buf, n, "%u秒", (unsigned)g_newsAutoSec);
+      else            snprintf(buf, n, "手动");
+      return buf;
+    case MENU_MIC:       return g_micKnock ? "开" : "关";
     default: buf[0] = 0; return buf;
   }
 }
@@ -743,6 +750,74 @@ static void drawMenu() {
       drawCN(disp(), 20, 216, pb, C_ACCENT);
       return;
     }
+    // ---- v7.4: 新补的设置页(工作模式/提醒间隔/底部快讯/新闻自动/麦克风) ----
+    //   统一用 16px 中文点阵: LovyanGFX 自带字体没有汉字, 用 drawString 画中文会成方块。
+    if (sel == MENU_MODE) {
+      drawCN(disp(), 8, 62, "选择工作模式(按M应用)", C_FLAT);
+      for (int i = 0; i < 2; i++) {
+        bool on = ((i == 0 ? APP_STOCK : APP_RADIO) == g_menuPickMode);
+        int y = 98 + i * 38;
+        if (on) disp().fillRect(6, y - 6, 228, 30, C_SEL);
+        drawCN(disp(), 18, y, i == 0 ? "股票行情(默认)" : "收音机(网络电台)",
+               on ? C_BG : C_FG, on ? C_SEL : C_BG);
+      }
+      drawCN(disp(), 12, 182, "左/右键 选择", C_FLAT);
+      drawCN(disp(), 12, 206, "M键应用 长按M回主屏", C_FLAT);
+      return;
+    }
+    if (sel == MENU_ALERT_REP) {
+      const char* v = alertRepeatName(g_alertRepeatMin);
+      drawCN(disp(), 8, 62, "同一只股票多久提醒一次", C_FLAT);
+      disp().fillRect(8, 92, 224, 34, C_ROW);
+      drawCN(disp(), (240 - cnTextWidth(v)) / 2, 101, v, C_ACCENT, C_ROW);
+      drawCN(disp(), 12, 142, "左/右键 切换间隔", C_FG);
+      drawCN(disp(), 12, 166, "5/15/30/60/120分/一天", C_FLAT);
+      drawCN(disp(), 12, 190, "默认 30 分钟", C_FLAT);
+      drawCN(disp(), 12, 214, "M键完成 长按M回主屏", C_FLAT);
+      return;
+    }
+    if (sel == MENU_TICKER) {
+      drawCN(disp(), 8, 62, "主界面最下一行滚动快讯", C_FLAT);
+      disp().fillRect(8, 92, 224, 34, C_ROW);
+      drawCN(disp(), (240 - cnTextWidth(g_tickerNews ? "开" : "关")) / 2, 101,
+             g_tickerNews ? "开" : "关",
+             g_tickerNews ? C_DOWN : C_FLAT, C_ROW);
+      drawCN(disp(), 12, 142, g_tickerNews ? "开启 列表/单只各让一行"
+                                          : "关闭 主区多一行行情",
+             g_tickerNews ? C_DOWN : C_FLAT);
+      drawCN(disp(), 12, 166, "左键关 右键开", C_FG);
+      drawCN(disp(), 12, 196, "M键完成 长按M回主屏", C_FLAT);
+      return;
+    }
+    if (sel == MENU_NEWS_AUTO) {
+      char vb[16];
+      if (g_newsAuto) snprintf(vb, sizeof(vb), "%d秒", (int)g_newsAutoSec);
+      else            strcpy(vb, "手动");
+      drawCN(disp(), 8, 62, "新闻页自动展播(逐条翻)", C_FLAT);
+      disp().fillRect(8, 92, 224, 34, C_ROW);
+      drawCN(disp(), (240 - cnTextWidth(vb)) / 2, 101, vb,
+             g_newsAuto ? C_ACCENT : C_FLAT, C_ROW);
+      drawCN(disp(), 12, 142, "左右键 关/5/10/20/30秒", C_FG);
+      drawCN(disp(), 12, 166, "关=只按左右键翻", C_FLAT);
+      drawCN(disp(), 12, 196, "M键完成 长按M回主屏", C_FLAT);
+      return;
+    }
+    if (sel == MENU_MIC) {
+      drawCN(disp(), 8, 62, "敲一下盒子代替M键", C_FLAT);
+      disp().fillRect(8, 88, 224, 34, C_ROW);
+      drawCN(disp(), (240 - cnTextWidth(g_micKnock ? "开" : "关")) / 2, 97,
+             g_micKnock ? "开" : "关",
+             g_micKnock ? C_DOWN : C_FLAT, C_ROW);
+      char b[40];
+      snprintf(b, sizeof(b), "阈值%u 已敲%u次", (unsigned)g_micThreshold,
+               (unsigned)micKnockCount());
+      drawCN(disp(), 12, 134, b, C_ACCENT);
+      drawCN(disp(), 12, 158, "短按左/右 开关", C_FG);
+      drawCN(disp(), 12, 182, "长按左/右 调阈值200", C_FLAT);
+      drawCN(disp(), 12, 206, "仅亮屏+股票模式生效", C_FLAT);
+      return;
+    }
+
     int v, vmax;
     if      (sel == MENU_BRIGHT)  { v = g_bright;     vmax = 100; }
     else if (sel == MENU_VOL)     { v = g_volume;     vmax = 100; }
